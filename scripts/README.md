@@ -29,6 +29,18 @@ pip install openai gitpython
 
 # 生成指定日期的日志并保存到指定文件
 ./gen_worklog.sh 2025-10-28 worklog.md
+
+#### 作者过滤与多仓库
+
+```bash
+# 仅统计作者(名字或邮箱包含关键字)
+AUTHOR="mapoet" ./gen_worklog.sh 2025-10-29
+
+# 多仓库（逗号分隔），并按作者过滤
+REPOS="/mnt/d/works/RayTracy,/path/to/another" \
+AUTHOR="mapoet" \
+./gen_worklog.sh 2025-10-29
+```
 ```
 
 ### 方法 2: 直接使用 Python 脚本
@@ -44,6 +56,17 @@ pip install openai gitpython
 
 # 只生成最近 7 天的日志
 ./git2work.py --days 7 --output worklog_7days.md
+
+#### 多项目与时间/产出分析
+
+```bash
+# 多项目：自动汇总“项目→日期→提交”，并在 AI 总结中按项目估算投入时间与主要产出
+./git2work.py \
+  --repos "/mnt/d/works/RayTracy,/path/to/another" \
+  --since 2025-10-28 --until 2025-10-29 \
+  --add-summary --provider deepseek --deepseek-model deepseek-chat \
+  --output worklog_multi.md --title "多项目工作日志"
+```
 ```
 
 #### 使用 AI 总结

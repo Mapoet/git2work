@@ -14,6 +14,7 @@ OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
 DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"
 OPENAI_KEY_ENV="${OPENAI_API_KEY:-}"
 DEEPSEEK_KEY_ENV="${DEEPSEEK_API_KEY:-}"
+AUTHOR_FILTER="${AUTHOR:-}"
 
 # 解析参数
 if [ "$1" = "--test" ]; then
@@ -76,6 +77,10 @@ if [ -n "$REPOS" ]; then
     BASE_CMD+=(--repos "$REPOS")
 else
     BASE_CMD+=(--repo "$REPO")
+fi
+if [ -n "$AUTHOR_FILTER" ]; then
+    BASE_CMD+=(--author "$AUTHOR_FILTER")
+    echo "作者过滤: $AUTHOR_FILTER"
 fi
 
 if [ "$TEST_MODE" = "1" ]; then

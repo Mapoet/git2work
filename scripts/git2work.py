@@ -453,6 +453,10 @@ def git2work():
         if args.system_prompt_file and os.path.exists(args.system_prompt_file):
             with open(args.system_prompt_file, 'r', encoding='utf-8') as f:
                 system_prompt = f.read()
+        # 若存在作者过滤，向系统提示词追加作者说明，便于模型按作者聚焦
+        if args.author:
+            author_hint = f"\n作者过滤: {args.author}\n请仅基于作者姓名或邮箱包含上述关键词的提交进行总结，并在摘要开头显式标注该作者。\n"
+            system_prompt = (system_prompt or "") + author_hint
         
         if getattr(args, 'provider', 'openai') == 'deepseek':
             summary_text = generate_summary_with_deepseek(
