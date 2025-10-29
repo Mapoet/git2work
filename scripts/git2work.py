@@ -127,7 +127,8 @@ def generate_summary_with_openai(
     details: Dict[str, Tuple[List[str], int, int, str]],
     system_prompt: Optional[str] = None,
     openai_api_key: Optional[str] = None,
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4o-mini",
+    author: Optional[str] = None
 ) -> str:
     """
     使用 OpenAI API 生成工作总结。
@@ -182,6 +183,8 @@ def generate_summary_with_openai(
 请根据提供的 commit 信息生成工作总结。"""
     
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
+    if author:
+        system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"
     user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
     
     try:
@@ -202,7 +205,8 @@ def generate_summary_with_deepseek(
     details: Dict[str, Tuple[List[str], int, int, str]],
     system_prompt: Optional[str] = None,
     deepseek_api_key: Optional[str] = None,
-    model: str = "deepseek-chat"
+    model: str = "deepseek-chat",
+    author: Optional[str] = None
 ) -> str:
     """
     使用 DeepSeek API 生成工作总结（OpenAI 兼容的 Chat Completions 格式）。
@@ -246,6 +250,8 @@ def generate_summary_with_deepseek(
 
 请根据提供的 commit 信息生成工作总结。"""
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
+    if author:
+        system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"
     user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
 
     # 映射模型名称（DeepSeek 的正确模型名称）
@@ -453,10 +459,6 @@ def git2work():
         if args.system_prompt_file and os.path.exists(args.system_prompt_file):
             with open(args.system_prompt_file, 'r', encoding='utf-8') as f:
                 system_prompt = f.read()
-        # 若存在作者过滤，向系统提示词追加作者说明，便于模型按作者聚焦
-        if args.author:
-            author_hint = f"\n作者过滤: {args.author}\n请仅基于作者姓名或邮箱包含上述关键词的提交进行总结，并在摘要开头显式标注该作者。\n"
-            system_prompt = (system_prompt or "") + author_hint
         
         if getattr(args, 'provider', 'openai') == 'deepseek':
             summary_text = generate_summary_with_deepseek(
@@ -464,7 +466,8 @@ def git2work():
                 details,  # type: ignore
                 system_prompt=system_prompt,
                 deepseek_api_key=args.deepseek_key,
-                model=args.deepseek_model
+                model=args.deepseek_model,
+                author=args.author
             )
         else:
             summary_text = generate_summary_with_openai(
@@ -472,7 +475,8 @@ def git2work():
                 details,  # type: ignore
                 system_prompt=system_prompt,
                 openai_api_key=args.openai_key,
-                model=args.openai_model
+                model=args.openai_model,
+                author=args.author
             )
         print("AI 总结生成完成")
     
