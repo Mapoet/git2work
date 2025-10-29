@@ -21,6 +21,31 @@ except ImportError:
     OPENAI_AVAILABLE = False
     print("Warning: openai package not installed. Please run: pip install openai")
 
+
+# 默认系统提示词
+default_system_prompt = """你是一个专业的技术文档撰写助手。根据提供的 git commit 记录，生成一份结构化的中文工作总结。
+
+要求：
+1. 使用 Markdown 格式
+2. 总结主要包括：
+   - 今日工作概述（3-5句）
+   - 主要完成内容（按模块分类）
+   - 统计数据（提交数、代码变更、涉及文件等）
+   - 技术亮点或重要改进
+3. 语言简洁专业，避免过于冗长
+4. 重点关注代码改进、功能增强、问题修复等技术性内容
+
+【工作会话时间图要求】
+如果提供的 commit 记录中包含工作会话统计信息（如“工作会话: X 个，总时长约 Y 分钟”），请基于这些会话信息绘制一个简洁的工作内容时间分布图。图应包含：
+1. 各工作会话的起止时间范围
+2. 每个会话涉及的提交数量或主要功能模块
+3. 会话之间的时间间隔（便于识别工作节奏）
+4. 如有跨项目提交，标注项目切换的时间点
+
+时间图可使用 Markdown 表格及 Mermaid 流程图格式呈现。
+
+请根据提供的 commit 信息生成工作总结。"""
+
 def parse_git_log(raw):
     # 我们使用 git log 输出以 \x1e（record sep）分割 commit，以 \x1f 字段分割
     commits = []
@@ -256,22 +281,7 @@ def generate_summary_with_openai(
                 if files:
                     context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
         commit_context = "\n".join(context_lines)
-    
-    # 默认系统提示词
-    default_system_prompt = """你是一个专业的技术文档撰写助手。根据提供的 git commit 记录，生成一份结构化的中文工作总结。
 
-要求：
-1. 使用 Markdown 格式
-2. 总结主要包括：
-   - 今日工作概述（3-5句）
-   - 主要完成内容（按模块分类）
-   - 统计数据（提交数、代码变更、涉及文件等）
-   - 技术亮点或重要改进
-3. 语言简洁专业，避免过于冗长
-4. 重点关注代码改进、功能增强、问题修复等技术性内容
-
-请根据提供的 commit 信息生成工作总结。"""
-    
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     if author:
         system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"
@@ -326,20 +336,7 @@ def generate_summary_with_deepseek(
                 if files:
                     context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
         commit_context = "\n".join(context_lines)
-
-    default_system_prompt = """你是一个专业的技术文档撰写助手。根据提供的 git commit 记录，生成一份结构化的中文工作总结。
-
-要求：
-1. 使用 Markdown 格式
-2. 总结主要包括：
-   - 今日工作概述（3-5句）
-   - 主要完成内容（按模块分类）
-   - 统计数据（提交数、代码变更、涉及文件等）
-   - 技术亮点或重要改进
-3. 语言简洁专业，避免过于冗长
-4. 重点关注代码改进、功能增强、问题修复等技术性内容
-
-请根据提供的 commit 信息生成工作总结。"""
+        
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     if author:
         system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"

@@ -12,6 +12,7 @@
 - 🔄 支持多 LLM 提供商（OpenAI / DeepSeek）
 - 🧩 多项目分析：支持 `--repos` 多仓库输入，输出按“项目→日期→提交”归档
 - 👤 作者过滤：通过 `--author` 或脚本环境变量 `AUTHOR` 仅统计指定作者/邮箱
+- ⏱️ 精细化时间分析：基于 commit 时间戳统计工作会话、功能窗口、跨项目交叉时间，并在 AI 总结中绘制工作内容时间分布图
 
 ## 项目结构
 
@@ -62,6 +63,9 @@ AUTHOR="mapoet" ./gen_worklog.sh 2025-10-29
 
 # 多仓库输入（逗号分隔）
 REPOS="/mnt/d/works/RayTracy,/path/to/another" ./gen_worklog.sh 2025-10-29
+
+# 自定义会话间隔（默认1440分钟=24小时，可通过GAP_MINUTES环境变量调整）
+GAP_MINUTES=60 ./gen_worklog.sh 2025-10-29
 ```
 
 ## 详细文档
