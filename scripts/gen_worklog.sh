@@ -15,7 +15,7 @@ DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"
 OPENAI_KEY_ENV="${OPENAI_API_KEY:-}"
 DEEPSEEK_KEY_ENV="${DEEPSEEK_API_KEY:-}"
 AUTHOR_FILTER="${AUTHOR:-}"
-
+GAP_MINUTES="${GAP_MINUTES:-1440}" # 1440 minutes = 24 hours    
 # 解析参数
 if [ "$1" = "--test" ]; then
     TEST_MODE=1
@@ -72,7 +72,7 @@ echo ""
 echo "正在生成工作日志..."
 
 # 基础命令
-BASE_CMD=(python3 "$(dirname "$0")/git2work.py" --since "$DATE" --until "$DATE" --output "$OUTPUT" --title "$TITLE")
+BASE_CMD=(python3 "$(dirname "$0")/git2work.py" --since "$DATE" --until "$DATE" --output "$OUTPUT" --title "$TITLE" --session-gap-minutes "$GAP_MINUTES")
 if [ -n "$REPOS" ]; then
     BASE_CMD+=(--repos "$REPOS")
 else

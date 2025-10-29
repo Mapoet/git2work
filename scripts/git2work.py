@@ -57,7 +57,13 @@ def get_commits_between(repo_path, since_dt, until_dt, max_count=None):
     # gitpython 没有直接参数用来筛选日期，所以使用 git directly via repo.git.log 更方便：
     since = since_dt.isoformat(sep=' ')
     until = until_dt.isoformat(sep=' ')
-    raw = repo.git.log(f'--since={since}', f'--until={until}', '--pretty=format:%H%x1f%an%x1f%ae%x1f%ad%x1f%s%x1e', date='iso')
+    # 增加 %at（author epoch 秒）便于稳定时间统计
+    raw = repo.git.log(
+        f'--since={since}',
+        f'--until={until}',
+        '--pretty=format:%H%x1f%an%x1f%ae%x1f%ad%x1f%at%x1f%s%x1e',
+        date='iso'
+    )
     # 复用上面 parse 函数
     return parse_git_log(raw)
 
@@ -109,40 +115,43 @@ def group_commits_by_date(commits: List[Dict]) -> Dict[str, List[Dict]]:
         groups[k].sort(key=lambda x: x['date'])
     return dict(sorted(groups.items(), key=lambda x: x[0]))
 
-def parse_commit_datetime(date_str: str) -> datetime:
-    # git --date=iso produces like: 2025-10-20 12:34:56 +0800
-    # Normalize by removing timezone for session ordering (local strings already include tz offset)
-    try:
-        # Try with timezone
-        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S %z").astimezone().replace(tzinfo=None)
-    except Exception:
-        # Fallback without tz
+def commit_time_dt(c: Dict) -> datetime:
+    if c.get('date_epoch'):
         try:
-            return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            return datetime.fromtimestamp(int(c['date_epoch']))
         except Exception:
-            return datetime.fromisoformat(date_str.replace(' ', 'T').split(' +')[0])
+            pass
+    # Fallback parse from string
+    ds = c.get('date', '')
+    try:
+        return datetime.strptime(ds, "%Y-%m-%d %H:%M:%S %z").astimezone().replace(tzinfo=None)
+    except Exception:
+        try:
+            return datetime.strptime(ds, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return datetime.fromisoformat(ds.replace(' ', 'T').split(' +')[0])
 
 def compute_work_sessions(commits: List[Dict], gap_minutes: int = 60) -> List[Dict]:
     if not commits:
         return []
-    items = sorted(commits, key=lambda c: parse_commit_datetime(c['date']))
+    items = sorted(commits, key=lambda c: commit_time_dt(c))
     sessions: List[Dict] = []
     gap = timedelta(minutes=gap_minutes)
     current = {
-        'start': parse_commit_datetime(items[0]['date']),
-        'end': parse_commit_datetime(items[0]['date']),
+        'start': commit_time_dt(items[0]),
+        'end': commit_time_dt(items[0]),
         'commits': [items[0]],
     }
     for c in items[1:]:
-        t = parse_commit_datetime(c['date'])
-        if t - parse_commit_datetime(current['commits'][-1]['date']) <= gap:
+        t = commit_time_dt(c)
+        if t - commit_time_dt(current['commits'][-1]) <= gap:
             current['end'] = t
             current['commits'].append(c)
         else:
-            current['duration_minutes'] = int((current['end'] - current['start']).total_seconds() // 60)
+            current['duration_minutes'] = max(1, int((current['end'] - current['start']).total_seconds() // 60))
             sessions.append(current)
             current = {'start': t, 'end': t, 'commits': [c]}
-    current['duration_minutes'] = int((current['end'] - current['start']).total_seconds() // 60)
+    current['duration_minutes'] = max(1, int((current['end'] - current['start']).total_seconds() // 60))
     sessions.append(current)
     return sessions
 
@@ -153,7 +162,7 @@ def compute_feature_windows(commits: List[Dict]) -> Dict[str, Dict]:
         msg = c.get('message', '').strip()
         token = msg.split(':', 1)[0].lower().split(' ')[0]
         key = token if token in ['feat', 'fix', 'docs', 'build', 'refactor', 'chore', 'perf', 'test'] else 'other'
-        t = parse_commit_datetime(c['date'])
+        t = commit_time_dt(c)
         w = windows.get(key)
         if not w:
             windows[key] = {'start': t, 'end': t, 'count': 1}
