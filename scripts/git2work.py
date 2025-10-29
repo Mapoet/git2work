@@ -36,13 +36,14 @@ default_system_prompt = """你是一个专业的技术文档撰写助手。根�
 4. 重点关注代码改进、功能增强、问题修复等技术性内容
 
 【工作会话时间图要求】
-如果提供的 commit 记录中包含工作会话统计信息（如“工作会话: X 个，总时长约 Y 分钟”），请基于这些会话信息绘制一个简洁的工作内容时间分布图。图应包含：
+如果提供的 commit 记录中包含工作会话统计信息（如"工作会话: X 个，总时长约 Y 分钟"），请基于这些会话信息绘制一个简洁的工作内容时间分布图。图应包含：
 1. 各工作会话的起止时间范围
 2. 每个会话涉及的提交数量或主要功能模块
 3. 会话之间的时间间隔（便于识别工作节奏）
 4. 如有跨项目提交，标注项目切换的时间点
+5. **特别注意并行工作时间**：如果存在"跨项目并行工作时间段"标识，请在时间图中清晰标注同时在不同项目上工作的时段，这有助于准确评估实际投入时间（并行工作不应简单累加）
 
-时间图可使用 Markdown 表格及 Mermaid 流程图格式呈现。
+时间图可使用 Markdown 表格及 Mermaid 10分钟级甘特图形式呈现。
 
 请根据提供的 commit 信息生成工作总结。"""
 
@@ -199,21 +200,140 @@ def compute_feature_windows(commits: List[Dict]) -> Dict[str, Dict]:
             w['count'] += 1
     return windows
 
+def detect_parallel_sessions(repo_to_sessions: Dict[str, List[Dict]]) -> List[Dict]:
+    """
+    检测跨项目的并行工作时段。
+    返回重叠的时间段及其涉及的项目列表。
+    """
+    if len(repo_to_sessions) < 2:
+        return []  # 单项目不需要检测并行
+    
+    all_periods: List[Dict] = []
+    for repo, sessions in repo_to_sessions.items():
+        for s in sessions:
+            all_periods.append({
+                'start': s['start'],
+                'end': s['end'],
+                'repo': repo,
+                'session': s
+            })
+    
+    if not all_periods:
+        return []
+    
+    # 合并重叠时段算法：按时间线扫描，合并连续或重叠的时段
+    all_periods.sort(key=lambda x: (x['start'], x['end']))
+    merged_overlaps: List[Dict] = []
+    
+    current_overlaps = []  # 当前正在重叠的时段组
+    
+    for period in all_periods:
+        if not current_overlaps:
+            current_overlaps = [period]
+            continue
+        
+        # 检查当前时段是否与已有重叠组有时间重叠
+        can_merge = False
+        for existing in current_overlaps:
+            if not (period['end'] < existing['start'] or period['start'] > existing['end']):
+                can_merge = True
+                break
+        
+        if can_merge:
+            current_overlaps.append(period)
+        else:
+            # 结束当前重叠组，开始新的
+            if len(set(p['repo'] for p in current_overlaps)) > 1:
+                overlap_start = min(p['start'] for p in current_overlaps)
+                overlap_end = max(p['end'] for p in current_overlaps)
+                overlap_repos = sorted(set(p['repo'] for p in current_overlaps))
+                merged_overlaps.append({
+                    'start': overlap_start,
+                    'end': overlap_end,
+                    'repos': overlap_repos,
+                    'duration_minutes': int((overlap_end - overlap_start).total_seconds() // 60)
+                })
+            current_overlaps = [period]
+    
+    # 处理最后一组
+    if len(set(p['repo'] for p in current_overlaps)) > 1:
+        overlap_start = min(p['start'] for p in current_overlaps)
+        overlap_end = max(p['end'] for p in current_overlaps)
+        overlap_repos = sorted(set(p['repo'] for p in current_overlaps))
+        merged_overlaps.append({
+            'start': overlap_start,
+            'end': overlap_end,
+            'repos': overlap_repos,
+            'duration_minutes': int((overlap_end - overlap_start).total_seconds() // 60)
+        })
+    
+    # 再次合并可能连续或部分重叠的时段
+    if not merged_overlaps:
+        return []
+    
+    final_merged: List[Dict] = []
+    merged_overlaps.sort(key=lambda x: (x['start'], x['end']))
+    
+    current = merged_overlaps[0]
+    for next_period in merged_overlaps[1:]:
+        # 如果时间有重叠或连续（间隔小于5分钟视为连续），且涉及相同项目，则合并
+        gap = (next_period['start'] - current['end']).total_seconds() / 60
+        if gap <= 5 or not (next_period['end'] < current['start'] or next_period['start'] > current['end']):
+            # 合并
+            current['start'] = min(current['start'], next_period['start'])
+            current['end'] = max(current['end'], next_period['end'])
+            current['repos'] = sorted(set(current['repos']) | set(next_period['repos']))
+            current['duration_minutes'] = int((current['end'] - current['start']).total_seconds() // 60)
+        else:
+            final_merged.append(current)
+            current = next_period
+    final_merged.append(current)
+    
+    return final_merged
+
 def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], gap_minutes: int = 60) -> str:
     lines: List[str] = []
+    
+    # 先计算所有项目的会话，用于检测并行工作
+    repo_to_sessions: Dict[str, List[Dict]] = {}
     for repo_name, grouped in repo_to_grouped.items():
-        lines.append(f"\n# 项目：{repo_name}")
-        # Build sessions from all commits in this repo
         flat_commits: List[Dict] = []
         for items in grouped.values():
             flat_commits.extend(items)
         sessions = compute_work_sessions(flat_commits, gap_minutes)
+        repo_to_sessions[repo_name] = sessions
+    
+    # 检测跨项目并行工作时间
+    parallel_periods = detect_parallel_sessions(repo_to_sessions)
+    if parallel_periods:
+        lines.append("# 跨项目并行工作时间段")
+        total_parallel_minutes = sum(p['duration_minutes'] for p in parallel_periods)
+        lines.append(f"检测到 {len(parallel_periods)} 个并行工作时段，总重叠时长约 {total_parallel_minutes} 分钟")
+        for idx, p in enumerate(parallel_periods, 1):
+            repos_str = ', '.join(p['repos'])
+            lines.append(f"- 并行时段{idx}: {p['start']} ~ {p['end']} ({p['duration_minutes']} 分钟, 涉及项目: {repos_str})")
+        lines.append("")
+    
+    # 各项目详细统计
+    for repo_name, grouped in repo_to_grouped.items():
+        lines.append(f"\n# 项目：{repo_name}")
+        sessions = repo_to_sessions[repo_name]
         if sessions:
             total_minutes = sum(s['duration_minutes'] for s in sessions)
             lines.append(f"工作会话: {len(sessions)} 个，总时长约 {total_minutes} 分钟")
             for idx, s in enumerate(sessions, 1):
-                lines.append(f"- 会话{idx}: {s['start']} ~ {s['end']} ({s['duration_minutes']} 分钟, {len(s['commits'])} 次提交)")
+                # 标记是否为并行时段
+                is_parallel = any(
+                    not (s['end'] < pp['start'] or s['start'] > pp['end'])
+                    for pp in parallel_periods
+                    if repo_name in pp['repos']
+                )
+                parallel_marker = " [并行]" if is_parallel else ""
+                lines.append(f"- 会话{idx}: {s['start']} ~ {s['end']} ({s['duration_minutes']} 分钟, {len(s['commits'])} 次提交){parallel_marker}")
         # Feature windows
+        flat_commits: List[Dict] = []
+        for items in grouped.values():
+            flat_commits.extend(items)
         fw = compute_feature_windows(flat_commits)
         if fw:
             lines.append("功能窗口:")
@@ -415,12 +535,53 @@ def render_markdown_worklog(
     
     return "\n".join(lines)
 
-def render_multi_project_worklog(title: str, repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], add_summary: bool = False, summary_text: Optional[str] = None) -> str:
+def render_multi_project_worklog(title: str, repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], add_summary: bool = False, summary_text: Optional[str] = None, gap_minutes: int = 60) -> str:
     lines: List[str] = []
     lines.append(f"# {title}")
     lines.append("")
     total_commits = sum(sum(len(v) for v in grouped.values()) for grouped in repo_to_grouped.values())
     lines.append(f"总计 {total_commits} 个提交，项目数 {len(repo_to_grouped)}")
+    lines.append("")
+    
+    # 计算并行工作时间
+    repo_to_sessions: Dict[str, List[Dict]] = {}
+    for repo_name, grouped in repo_to_grouped.items():
+        flat_commits: List[Dict] = []
+        for items in grouped.values():
+            flat_commits.extend(items)
+        sessions = compute_work_sessions(flat_commits, gap_minutes)
+        repo_to_sessions[repo_name] = sessions
+    
+    parallel_periods = detect_parallel_sessions(repo_to_sessions)
+    if parallel_periods:
+        lines.append("## 跨项目并行工作时间统计")
+        total_parallel_minutes = sum(p['duration_minutes'] for p in parallel_periods)
+        lines.append(f"检测到 **{len(parallel_periods)} 个并行工作时段**，总重叠时长约 **{total_parallel_minutes} 分钟**")
+        lines.append("")
+        for idx, p in enumerate(parallel_periods, 1):
+            repos_str = ', '.join(p['repos'])
+            lines.append(f"- **并行时段 {idx}**：{p['start'].strftime('%Y-%m-%d %H:%M')} ~ {p['end'].strftime('%Y-%m-%d %H:%M')} ({p['duration_minutes']} 分钟)")
+            lines.append(f"  - 涉及项目：{repos_str}")
+        lines.append("")
+        lines.append("> 注意：并行工作时间不应简单累加，实际投入时间以重叠时段的最大值为准。")
+        lines.append("")
+    
+    # 各项目时间统计
+    lines.append("## 各项目时间统计")
+    for repo_name, grouped in repo_to_grouped.items():
+        sessions = repo_to_sessions[repo_name]
+        if sessions:
+            total_minutes = sum(s['duration_minutes'] for s in sessions)
+            lines.append(f"### {repo_name}")
+            lines.append(f"- 工作会话：{len(sessions)} 个，总时长约 {total_minutes} 分钟")
+            for idx, s in enumerate(sessions, 1):
+                is_parallel = any(
+                    not (s['end'] < pp['start'] or s['start'] > pp['end'])
+                    for pp in parallel_periods
+                    if repo_name in pp['repos']
+                )
+                parallel_marker = " **[并行]**" if is_parallel else ""
+                lines.append(f"  - 会话{idx}：{s['start'].strftime('%H:%M')} ~ {s['end'].strftime('%H:%M')} ({s['duration_minutes']} 分钟, {len(s['commits'])} 次提交){parallel_marker}")
     lines.append("")
     for repo_name, grouped in repo_to_grouped.items():
         lines.append(f"# 项目：{repo_name}")
@@ -574,7 +735,7 @@ def git2work():
     if not multi_project:
         md = render_markdown_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text)  # type: ignore
     else:
-        md = render_multi_project_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text)  # type: ignore
+        md = render_multi_project_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text, gap_minutes=args.session_gap_minutes)  # type: ignore
 
     if args.output:
         os.makedirs(os.path.dirname(args.output), exist_ok=True) if os.path.dirname(args.output) else None

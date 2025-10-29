@@ -15,7 +15,7 @@ DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"
 OPENAI_KEY_ENV="${OPENAI_API_KEY:-}"
 DEEPSEEK_KEY_ENV="${DEEPSEEK_API_KEY:-}"
 AUTHOR_FILTER="${AUTHOR:-}"
-GAP_MINUTES="${GAP_MINUTES:-1440}" # 1440 minutes = 24 hours    
+GAP_MINUTES="${GAP_MINUTES:-300}" # 1440 minutes = 24 hours    
 # 解析参数
 if [ "$1" = "--test" ]; then
     TEST_MODE=1
