@@ -102,6 +102,26 @@ def group_commits_by_date(commits: List[Dict]) -> Dict[str, List[Dict]]:
         groups[k].sort(key=lambda x: x['date'])
     return dict(sorted(groups.items(), key=lambda x: x[0]))
 
+def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]]) -> str:
+    lines: List[str] = []
+    for repo_name, grouped in repo_to_grouped.items():
+        lines.append(f"\n# 项目：{repo_name}")
+        for day, items in grouped.items():
+            lines.append(f"\n## {day} ({len(items)} commits)")
+            for c in items:
+                sha = c['sha']
+                files, ins, dels, body = repo_to_details[repo_name].get(sha, ([], 0, 0, ""))
+                short_sha = sha[:8]
+                time_part = ' '.join(c['date'].split(' ')[1:3]) if ' ' in c['date'] else c['date']
+                lines.append(f"\n- [{short_sha}] {time_part}")
+                lines.append(f"  提交信息: {c['message']}")
+                lines.append(f"  统计: {ins} 行新增, {dels} 行删除, {len(files)} 个文件")
+                if body and body.strip() != c['message']:
+                    lines.append(f"  详细内容:\n{body}")
+                if files:
+                    lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
+    return "\n".join(lines)
+
 def generate_summary_with_openai(
     grouped: Dict[str, List[Dict]], 
     details: Dict[str, Tuple[List[str], int, int, str]],
@@ -122,24 +142,29 @@ def generate_summary_with_openai(
     
     client = OpenAI(api_key=api_key)
     
-    # 构建提交上下文
-    context_lines = []
-    for day, items in grouped.items():
-        context_lines.append(f"\n## {day} ({len(items)} commits)")
-        for c in items:
-            sha = c['sha']
-            files, ins, dels, body = details.get(sha, ([], 0, 0, ""))
-            short_sha = sha[:8]
-            time_part = ' '.join(c['date'].split(' ')[1:3]) if ' ' in c['date'] else c['date']
-            context_lines.append(f"\n- [{short_sha}] {time_part}")
-            context_lines.append(f"  提交信息: {c['message']}")
-            context_lines.append(f"  统计: {ins} 行新增, {dels} 行删除, {len(files)} 个文件")
-            if body and body.strip() != c['message']:
-                context_lines.append(f"  详细内容:\n{body}")
-            if files:
-                context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
-    
-    commit_context = "\n".join(context_lines)
+    # 兼容单项目或多项目上下文
+    if isinstance(grouped, dict) and grouped and all(isinstance(v, dict) for v in grouped.values()):
+        # 多项目：grouped: repo -> {day -> commits}
+        repo_to_grouped = grouped  # type: ignore
+        repo_to_details = details  # type: ignore
+        commit_context = build_commit_context_by_project(repo_to_grouped, repo_to_details)  # type: ignore
+    else:
+        context_lines = []
+        for day, items in grouped.items():
+            context_lines.append(f"\n## {day} ({len(items)} commits)")
+            for c in items:
+                sha = c['sha']
+                files, ins, dels, body = details.get(sha, ([], 0, 0, ""))
+                short_sha = sha[:8]
+                time_part = ' '.join(c['date'].split(' ')[1:3]) if ' ' in c['date'] else c['date']
+                context_lines.append(f"\n- [{short_sha}] {time_part}")
+                context_lines.append(f"  提交信息: {c['message']}")
+                context_lines.append(f"  统计: {ins} 行新增, {dels} 行删除, {len(files)} 个文件")
+                if body and body.strip() != c['message']:
+                    context_lines.append(f"  详细内容:\n{body}")
+                if files:
+                    context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
+        commit_context = "\n".join(context_lines)
     
     # 默认系统提示词
     default_system_prompt = """你是一个专业的技术文档撰写助手。根据提供的 git commit 记录，生成一份结构化的中文工作总结。
@@ -156,7 +181,7 @@ def generate_summary_with_openai(
 
 请根据提供的 commit 信息生成工作总结。"""
     
-    system_msg = system_prompt or default_system_prompt
+    system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
     
     try:
@@ -186,23 +211,26 @@ def generate_summary_with_deepseek(
     if not final_key:
         return "错误：未提供 DeepSeek API key。请设置环境变量 DEEPSEEK_API_KEY 或使用 --deepseek-key 参数"
 
-    # 构建上下文
-    context_lines = []
-    for day, items in grouped.items():
-        context_lines.append(f"\n## {day} ({len(items)} commits)")
-        for c in items:
-            sha = c['sha']
-            files, ins, dels, body = details.get(sha, ([], 0, 0, ""))
-            short_sha = sha[:8]
-            time_part = ' '.join(c['date'].split(' ')[1:3]) if ' ' in c['date'] else c['date']
-            context_lines.append(f"\n- [{short_sha}] {time_part}")
-            context_lines.append(f"  提交信息: {c['message']}")
-            context_lines.append(f"  统计: {ins} 行新增, {dels} 行删除, {len(files)} 个文件")
-            if body and body.strip() != c['message']:
-                context_lines.append(f"  详细内容:\n{body}")
-            if files:
-                context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
-    commit_context = "\n".join(context_lines)
+    # 构建上下文（支持多项目）
+    if isinstance(grouped, dict) and grouped and all(isinstance(v, dict) for v in grouped.values()):
+        commit_context = build_commit_context_by_project(grouped, details)  # type: ignore
+    else:
+        context_lines = []
+        for day, items in grouped.items():
+            context_lines.append(f"\n## {day} ({len(items)} commits)")
+            for c in items:
+                sha = c['sha']
+                files, ins, dels, body = details.get(sha, ([], 0, 0, ""))
+                short_sha = sha[:8]
+                time_part = ' '.join(c['date'].split(' ')[1:3]) if ' ' in c['date'] else c['date']
+                context_lines.append(f"\n- [{short_sha}] {time_part}")
+                context_lines.append(f"  提交信息: {c['message']}")
+                context_lines.append(f"  统计: {ins} 行新增, {dels} 行删除, {len(files)} 个文件")
+                if body and body.strip() != c['message']:
+                    context_lines.append(f"  详细内容:\n{body}")
+                if files:
+                    context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
+        commit_context = "\n".join(context_lines)
 
     default_system_prompt = """你是一个专业的技术文档撰写助手。根据提供的 git commit 记录，生成一份结构化的中文工作总结。
 
@@ -217,7 +245,7 @@ def generate_summary_with_deepseek(
 4. 重点关注代码改进、功能增强、问题修复等技术性内容
 
 请根据提供的 commit 信息生成工作总结。"""
-    system_msg = system_prompt or default_system_prompt
+    system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
 
     # 映射模型名称（DeepSeek 的正确模型名称）
@@ -293,9 +321,42 @@ def render_markdown_worklog(
     
     return "\n".join(lines)
 
+def render_multi_project_worklog(title: str, repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], add_summary: bool = False, summary_text: Optional[str] = None) -> str:
+    lines: List[str] = []
+    lines.append(f"# {title}")
+    lines.append("")
+    total_commits = sum(sum(len(v) for v in grouped.values()) for grouped in repo_to_grouped.values())
+    lines.append(f"总计 {total_commits} 个提交，项目数 {len(repo_to_grouped)}")
+    lines.append("")
+    for repo_name, grouped in repo_to_grouped.items():
+        lines.append(f"# 项目：{repo_name}")
+        lines.append("")
+        for day, items in grouped.items():
+            lines.append(f"## {day} ({len(items)} commits)")
+            lines.append("")
+            for c in items:
+                sha = c['sha']
+                short_sha = sha[:8]
+                files, ins, dels, body = repo_to_details[repo_name].get(sha, ([], 0, 0, ""))
+                time_part = ' '.join(c['date'].split(' ')[1:3]) if ' ' in c['date'] else c['date']
+                lines.append(f"- [{short_sha}] {time_part} | {c['message']} ({ins}+/{dels}-; {len(files)} files)")
+                if files:
+                    lines.append(f"  - files: {', '.join(files[:10])}{' ...' if len(files) > 10 else ''}")
+                if body:
+                    lines.append("  - message:")
+                    lines.append("```")
+                    lines.extend(body.splitlines())
+                    lines.append("```")
+            lines.append("")
+        lines.append("")
+    if add_summary and summary_text:
+        lines.append(summary_text)
+    return "\n".join(lines)
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate work log from git commits")
-    parser.add_argument('--repo', type=str, default="/mnt/d/works/RayTracy", help='Path to git repository')
+    parser.add_argument('--repo', type=str, default=None, help='Path to git repository (single)')
+    parser.add_argument('--repos', type=str, default=None, help='Multiple repositories, comma-separated')
     parser.add_argument('--since', type=str, default=None, help='Start datetime (ISO or YYYY-MM-DD)')
     parser.add_argument('--until', type=str, default=None, help='End datetime (ISO or YYYY-MM-DD)')
     parser.add_argument('--days', type=int, default=None, help='If set, use last N days ending today')
@@ -326,7 +387,14 @@ def parse_date_input(value: Optional[str], default_dt: Optional[datetime]) -> Op
 
 def git2work():
     args = parse_args()
-    repo = args.repo
+    repo_paths: List[str] = []
+    if args.repos:
+        repo_paths = [p.strip() for p in args.repos.split(',') if p.strip()]
+    elif args.repo:
+        repo_paths = [args.repo]
+    else:
+        # fallback to default single repo if none provided
+        repo_paths = ["/mnt/d/works/RayTracy"]
 
     now = datetime.now()
     if args.days is not None and args.days > 0:
@@ -340,22 +408,40 @@ def git2work():
         if end is not None:
             end = end.replace(hour=23, minute=59, second=59, microsecond=0)
 
-    # 获取提交
-    commits = get_commits_between(repo, start, end)
+    multi_project = len(repo_paths) > 1
 
-    # 过滤作者（可选）
-    if args.author:
-        author_lower = args.author.lower()
-        commits = [c for c in commits if author_lower in c['author_name'].lower() or author_lower in c['author_email'].lower()]
+    if not multi_project:
+        repo = repo_paths[0]
+        commits = get_commits_between(repo, start, end)
+        if args.author:
+            author_lower = args.author.lower()
+            commits = [c for c in commits if author_lower in c['author_name'].lower() or author_lower in c['author_email'].lower()]
+        details: Dict[str, Tuple[List[str], int, int, str]] = {}
+        for c in commits:
+            files, ins, dels = get_commit_numstat(repo, c['sha'])
+            body = get_commit_body(repo, c['sha'])
+            details[c['sha']] = (files, ins, dels, body)
+        grouped = group_commits_by_date(commits)
+    else:
+        repo_to_commits: Dict[str, List[Dict]] = {}
+        repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]] = {}
+        repo_to_grouped: Dict[str, Dict[str, List[Dict]]] = {}
+        for repo in repo_paths:
+            commits = get_commits_between(repo, start, end)
+            if args.author:
+                author_lower = args.author.lower()
+                commits = [c for c in commits if author_lower in c['author_name'].lower() or author_lower in c['author_email'].lower()]
+            repo_to_commits[repo] = commits
+            details_map: Dict[str, Tuple[List[str], int, int, str]] = {}
+            for c in commits:
+                files, ins, dels = get_commit_numstat(repo, c['sha'])
+                body = get_commit_body(repo, c['sha'])
+                details_map[c['sha']] = (files, ins, dels, body)
+            repo_to_details[repo] = details_map
+            repo_to_grouped[repo] = group_commits_by_date(commits)
+        grouped = repo_to_grouped  # type: ignore
+        details = repo_to_details  # type: ignore
 
-    # 为每个 commit 获取文件与增删行细节
-    details: Dict[str, Tuple[List[str], int, int, str]] = {}
-    for c in commits:
-        files, ins, dels = get_commit_numstat(repo, c['sha'])
-        body = get_commit_body(repo, c['sha'])
-        details[c['sha']] = (files, ins, dels, body)
-
-    grouped = group_commits_by_date(commits)
     title = args.title or (f"Work Log: {start.date()} to {end.date()}" if start and end else "Work Log")
     
     # 生成总结（如果需要）
@@ -370,23 +456,26 @@ def git2work():
         
         if getattr(args, 'provider', 'openai') == 'deepseek':
             summary_text = generate_summary_with_deepseek(
-                grouped,
-                details,
+                grouped,  # type: ignore
+                details,  # type: ignore
                 system_prompt=system_prompt,
                 deepseek_api_key=args.deepseek_key,
                 model=args.deepseek_model
             )
         else:
             summary_text = generate_summary_with_openai(
-                grouped, 
-                details,
+                grouped,  # type: ignore
+                details,  # type: ignore
                 system_prompt=system_prompt,
                 openai_api_key=args.openai_key,
                 model=args.openai_model
             )
         print("AI 总结生成完成")
     
-    md = render_markdown_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text)
+    if not multi_project:
+        md = render_markdown_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text)  # type: ignore
+    else:
+        md = render_multi_project_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text)  # type: ignore
 
     if args.output:
         os.makedirs(os.path.dirname(args.output), exist_ok=True) if os.path.dirname(args.output) else None
