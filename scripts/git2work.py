@@ -30,13 +30,20 @@ def parse_git_log(raw):
         parts = entry.split("\x1f")
         if len(parts) < 5:
             continue
-        sha, author_name, author_email, date_str, message = [p.strip() for p in parts[:5]]
+        # 支持两种格式：5字段(旧) 或 6字段(含 %at epoch)
+        if len(parts) >= 6:
+            sha, author_name, author_email, date_str, epoch_str, message = [p.strip() for p in parts[:6]]
+            date_epoch = int(epoch_str) if epoch_str.isdigit() else None
+        else:
+            sha, author_name, author_email, date_str, message = [p.strip() for p in parts[:5]]
+            date_epoch = None
         # date_str 示例: 2025-10-20 12:34:56 +0800 （取决于 --date=iso）
         commits.append({
             "sha": sha,
             "author_name": author_name,
             "author_email": author_email,
             "date": date_str,
+            "date_epoch": date_epoch,
             "message": message,
         })
     return commits
@@ -102,10 +109,83 @@ def group_commits_by_date(commits: List[Dict]) -> Dict[str, List[Dict]]:
         groups[k].sort(key=lambda x: x['date'])
     return dict(sorted(groups.items(), key=lambda x: x[0]))
 
-def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]]) -> str:
+def parse_commit_datetime(date_str: str) -> datetime:
+    # git --date=iso produces like: 2025-10-20 12:34:56 +0800
+    # Normalize by removing timezone for session ordering (local strings already include tz offset)
+    try:
+        # Try with timezone
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S %z").astimezone().replace(tzinfo=None)
+    except Exception:
+        # Fallback without tz
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return datetime.fromisoformat(date_str.replace(' ', 'T').split(' +')[0])
+
+def compute_work_sessions(commits: List[Dict], gap_minutes: int = 60) -> List[Dict]:
+    if not commits:
+        return []
+    items = sorted(commits, key=lambda c: parse_commit_datetime(c['date']))
+    sessions: List[Dict] = []
+    gap = timedelta(minutes=gap_minutes)
+    current = {
+        'start': parse_commit_datetime(items[0]['date']),
+        'end': parse_commit_datetime(items[0]['date']),
+        'commits': [items[0]],
+    }
+    for c in items[1:]:
+        t = parse_commit_datetime(c['date'])
+        if t - parse_commit_datetime(current['commits'][-1]['date']) <= gap:
+            current['end'] = t
+            current['commits'].append(c)
+        else:
+            current['duration_minutes'] = int((current['end'] - current['start']).total_seconds() // 60)
+            sessions.append(current)
+            current = {'start': t, 'end': t, 'commits': [c]}
+    current['duration_minutes'] = int((current['end'] - current['start']).total_seconds() // 60)
+    sessions.append(current)
+    return sessions
+
+def compute_feature_windows(commits: List[Dict]) -> Dict[str, Dict]:
+    # Group by leading token of commit message (e.g., feat, fix, docs, build, refactor)
+    windows: Dict[str, Dict] = {}
+    for c in commits:
+        msg = c.get('message', '').strip()
+        token = msg.split(':', 1)[0].lower().split(' ')[0]
+        key = token if token in ['feat', 'fix', 'docs', 'build', 'refactor', 'chore', 'perf', 'test'] else 'other'
+        t = parse_commit_datetime(c['date'])
+        w = windows.get(key)
+        if not w:
+            windows[key] = {'start': t, 'end': t, 'count': 1}
+        else:
+            if t < w['start']:
+                w['start'] = t
+            if t > w['end']:
+                w['end'] = t
+            w['count'] += 1
+    return windows
+
+def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], gap_minutes: int = 60) -> str:
     lines: List[str] = []
     for repo_name, grouped in repo_to_grouped.items():
         lines.append(f"\n# 项目：{repo_name}")
+        # Build sessions from all commits in this repo
+        flat_commits: List[Dict] = []
+        for items in grouped.values():
+            flat_commits.extend(items)
+        sessions = compute_work_sessions(flat_commits, gap_minutes)
+        if sessions:
+            total_minutes = sum(s['duration_minutes'] for s in sessions)
+            lines.append(f"工作会话: {len(sessions)} 个，总时长约 {total_minutes} 分钟")
+            for idx, s in enumerate(sessions, 1):
+                lines.append(f"- 会话{idx}: {s['start']} ~ {s['end']} ({s['duration_minutes']} 分钟, {len(s['commits'])} 次提交)")
+        # Feature windows
+        fw = compute_feature_windows(flat_commits)
+        if fw:
+            lines.append("功能窗口:")
+            for k, v in fw.items():
+                duration = int((v['end'] - v['start']).total_seconds() // 60)
+                lines.append(f"- {k}: {v['start']} ~ {v['end']} ({duration} 分钟, {v['count']} 次提交)")
         for day, items in grouped.items():
             lines.append(f"\n## {day} ({len(items)} commits)")
             for c in items:
@@ -128,7 +208,8 @@ def generate_summary_with_openai(
     system_prompt: Optional[str] = None,
     openai_api_key: Optional[str] = None,
     model: str = "gpt-4o-mini",
-    author: Optional[str] = None
+    author: Optional[str] = None,
+    gap_minutes: int = 60
 ) -> str:
     """
     使用 OpenAI API 生成工作总结。
@@ -148,7 +229,7 @@ def generate_summary_with_openai(
         # 多项目：grouped: repo -> {day -> commits}
         repo_to_grouped = grouped  # type: ignore
         repo_to_details = details  # type: ignore
-        commit_context = build_commit_context_by_project(repo_to_grouped, repo_to_details)  # type: ignore
+        commit_context = build_commit_context_by_project(repo_to_grouped, repo_to_details, gap_minutes)  # type: ignore
     else:
         context_lines = []
         for day, items in grouped.items():
@@ -206,7 +287,8 @@ def generate_summary_with_deepseek(
     system_prompt: Optional[str] = None,
     deepseek_api_key: Optional[str] = None,
     model: str = "deepseek-chat",
-    author: Optional[str] = None
+    author: Optional[str] = None,
+    gap_minutes: int = 60
 ) -> str:
     """
     使用 DeepSeek API 生成工作总结（OpenAI 兼容的 Chat Completions 格式）。
@@ -217,7 +299,7 @@ def generate_summary_with_deepseek(
 
     # 构建上下文（支持多项目）
     if isinstance(grouped, dict) and grouped and all(isinstance(v, dict) for v in grouped.values()):
-        commit_context = build_commit_context_by_project(grouped, details)  # type: ignore
+        commit_context = build_commit_context_by_project(grouped, details, gap_minutes)  # type: ignore
     else:
         context_lines = []
         for day, items in grouped.items():
@@ -366,6 +448,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--since', type=str, default=None, help='Start datetime (ISO or YYYY-MM-DD)')
     parser.add_argument('--until', type=str, default=None, help='End datetime (ISO or YYYY-MM-DD)')
     parser.add_argument('--days', type=int, default=None, help='If set, use last N days ending today')
+    parser.add_argument('--session-gap-minutes', type=int, default=60, help='Gap minutes to split work sessions')
     parser.add_argument('--author', type=str, default=None, help='Filter by author name or email (optional)')
     parser.add_argument('--output', type=str, default=None, help='Output file path (.md). If not set, print to stdout')
     parser.add_argument('--title', type=str, default=None, help='Title for the work log document')
@@ -467,7 +550,8 @@ def git2work():
                 system_prompt=system_prompt,
                 deepseek_api_key=args.deepseek_key,
                 model=args.deepseek_model,
-                author=args.author
+                author=args.author,
+                gap_minutes=args.session_gap_minutes
             )
         else:
             summary_text = generate_summary_with_openai(
@@ -476,7 +560,8 @@ def git2work():
                 system_prompt=system_prompt,
                 openai_api_key=args.openai_key,
                 model=args.openai_model,
-                author=args.author
+                author=args.author,
+                gap_minutes=args.session_gap_minutes
             )
         print("AI 总结生成完成")
     
