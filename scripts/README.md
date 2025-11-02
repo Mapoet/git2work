@@ -11,11 +11,16 @@
 - 🔧 支持自定义系统提示词
 - ⏱️ **精细化时间分析**：自动识别工作会话、功能窗口、跨项目交叉时间，并在 AI 总结中生成时间分布图
 - 🔄 **并行工作时间检测**：多项目模式下自动识别同时在不同项目上工作的时段，准确评估实际工作时间（避免重复累加）
+- 🌐 **远程仓库支持**：支持 GitHub 和 Gitee 远程仓库的 commits 和 PRs（Pull Requests/MRs）查询，无需本地克隆仓库
 
 ## 安装依赖
 
 ```bash
-pip install openai gitpython
+# 基础依赖
+pip install openai gitpython requests
+
+# GitHub 支持（可选，如需要查询 GitHub 仓库）
+pip install PyGithub
 ```
 
 ## 使用方法
@@ -75,6 +80,28 @@ AUTHOR="mapoet" \
   --add-summary --system-prompt-file system_prompt.txt \
   --repos /mnt/d/works/RayTracy,/mnt/d/works/git2work,/mnt/d/works/vtec \
   --provider deepseek
+
+# 查询 GitHub 仓库（需要 GitHub token）
+./git2work.py --github owner/repo --github-token YOUR_TOKEN \
+  --since 2025-10-01 --until 2025-10-31 --add-summary \
+  --output worklog_github.md
+
+# 查询 Gitee 仓库（需要 Gitee token）
+./git2work.py --gitee owner/repo --gitee-token YOUR_TOKEN \
+  --days 7 --add-summary --output worklog_gitee.md
+
+# 混合查询本地和远程仓库
+./git2work.py \
+  --repo /mnt/d/works/RayTracy \
+  --github owner/repo1 --gitee owner/repo2 \
+  --days 30 --add-summary --output worklog_mixed.md
+
+# 多仓库查询（支持混合本地和远程）
+./git2work.py \
+  --repos /mnt/d/works/RayTracy,/mnt/d/works/git2work \
+  --github owner/repo1,owner/repo2 \
+  --gitee owner/repo3 \
+  --days 30 --add-summary --output worklog_all.md
 ```
 
 **时间分析功能说明**：
@@ -113,6 +140,10 @@ export OPENAI_API_KEY="your-api-key"
 主要参数：
 - `--repo`: Git 仓库路径（单仓库，默认：/mnt/d/works/RayTracy）
 - `--repos`: 多仓库路径（逗号分隔，如 "/path/repo1,/path/repo2"）
+- `--github`: GitHub 仓库（格式：OWNER/REPO，多个用逗号分隔，如 "owner1/repo1,owner2/repo2"）
+- `--gitee`: Gitee 仓库（格式：OWNER/REPO，多个用逗号分隔，如 "owner1/repo1,owner2/repo2"）
+- `--github-token`: GitHub Personal Access Token（或使用环境变量 GITHUB_TOKEN）
+- `--gitee-token`: Gitee Personal Access Token（或使用环境变量 GITEE_TOKEN）
 - `--since`: 开始日期（ISO 或 YYYY-MM-DD 格式）
 - `--until`: 结束日期（ISO 或 YYYY-MM-DD 格式）
 - `--days`: 最近 N 天的提交
@@ -154,6 +185,8 @@ export OPENAI_API_KEY="your-api-key"
 
 - `OPENAI_API_KEY`: OpenAI API Key
 - `DEEPSEEK_API_KEY`: DeepSeek API Key
+- `GITHUB_TOKEN`: GitHub Personal Access Token（用于查询 GitHub 仓库）
+- `GITEE_TOKEN`: Gitee Personal Access Token（用于查询 Gitee 仓库）
 - `GIT_REPO`: 默认 Git 仓库路径（单仓库模式）
 - `REPOS`: 多个仓库路径（逗号分隔，多仓库模式）
 - `PROVIDER`: LLM 提供方（openai 或 deepseek）
@@ -165,6 +198,8 @@ export OPENAI_API_KEY="your-api-key"
 
 ```bash
 export OPENAI_API_KEY="sk-xxxxx"
+export GITHUB_TOKEN="ghp_xxxxx"
+export GITEE_TOKEN="your-gitee-token"
 export GIT_REPO="/path/to/your/repo"
 export SCRIPT_OUTPUT_DIR="/path/to/output"
 ```
@@ -186,8 +221,11 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
 3. **按日期分组的提交记录**：
    - 提交 SHA、时间、信息
    - 代码统计（新增/删除行数）
-   - 修改的文件列表
-   - 完整的 commit message
+     - 本地仓库：完整的文件变更统计
+     - 远程仓库：无法获取 numstat，显示为 0（但会标注为 PR 或 commit）
+   - 修改的文件列表（仅本地仓库）
+   - 完整的 commit message（本地仓库）或 PR 标题（远程仓库）
+   - 远程仓库的 PR 会以 `PR#123` 格式显示 SHA
 4. **AI 总结**（启用 `--add-summary` 时）：
    - 工作概述（含作者标注，如有过滤）
    - 主要完成内容（按模块分类）
@@ -213,11 +251,29 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
 
 # 生成带自定义提示词的日志
 ./git2work.py --days 1 --output worklog.md --add-summary --system-prompt-file custom_prompt.txt
+
+# 查询 GitHub 仓库并生成工作日志
+./git2work.py --github owner/repo --github-token YOUR_TOKEN \
+  --days 7 --add-summary --output worklog_github.md
+
+# 混合查询本地和远程仓库
+./git2work.py \
+  --repo /mnt/d/works/RayTracy \
+  --github owner/repo1 --gitee owner/repo2 \
+  --days 30 --add-summary --output worklog_mixed.md
 ```
 
 ## 注意事项
 
-1. 确保已安装必要的 Python 包（`openai`, `gitpython`）
-2. 需要有效的 OpenAI API Key
-3. API 调用会产生费用
-4. 建议使用 `gpt-4o-mini` 模型以节省成本
+1. 确保已安装必要的 Python 包（`openai`, `gitpython`, `requests`）
+2. 如需查询 GitHub 仓库，需要安装 `PyGithub`：`pip install PyGithub`
+3. 需要有效的 OpenAI/DeepSeek API Key（如使用 AI 总结功能）
+4. 查询远程仓库需要对应的 token：
+   - GitHub：需要 Personal Access Token（可在 GitHub Settings > Developer settings > Personal access tokens 创建）
+   - Gitee：需要 Personal Access Token（可在 Gitee 设置 > 安全设置 > 私人令牌 创建）
+5. 远程仓库查询限制：
+   - 无法获取文件变更统计（numstat），这些字段会显示为 0
+   - 某些情况下无法获取完整的 commit body
+   - PRs 按 `updated_at` 时间筛选，而不是创建时间
+6. API 调用会产生费用（OpenAI/DeepSeek）
+7. 建议使用 `gpt-4o-mini` 或 `deepseek-chat` 模型以节省成本

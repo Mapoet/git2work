@@ -10,16 +10,30 @@ import requests
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from git import Repo
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 # API Keys - 仅从环境变量读取，不提供默认值以确保安全
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITEE_TOKEN = os.getenv("GITEE_TOKEN")
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
     print("Warning: openai package not installed. Please run: pip install openai")
+try:
+    from github import Github
+    try:
+        from github import Auth
+        GITHUB_AUTH_AVAILABLE = True
+    except ImportError:
+        GITHUB_AUTH_AVAILABLE = False  # 旧版本 PyGithub
+    GITHUB_AVAILABLE = True
+except ImportError:
+    GITHUB_AVAILABLE = False
+    GITHUB_AUTH_AVAILABLE = False
+    print("Warning: PyGithub package not installed. Please run: pip install PyGithub")
 
 
 # 默认系统提示词
@@ -46,6 +60,300 @@ default_system_prompt = """你是一个专业的技术文档撰写助手。根�
 时间图可使用 Markdown 表格及 Mermaid 10分钟级甘特图形式呈现。
 
 请根据提供的 commit 信息生成工作总结。"""
+
+PEI="""\n\n最后计算一下效率指数（PEI）：
+        设：
+* $N_c$ = 当日提交次数
+* $L_{add}$ = 新增代码行数
+* $L_{del}$ = 删除代码行数
+* $T$ = 实际投入时间（小时，排除并行重叠）
+* $P_{mod}$ = 修改文件数
+* $C_{eff}$ = 编译通过率（或测试通过率，0~1）
+* $C_{cmp}$ = 代码复杂度系数（0.5~1.5，可依据任务类型调整）
+---
+公式：
+$$
+\\text{PEI} = \\frac{(0.4 N_c + 0.3 \\log_{10}(L_{add}+L_{del}) + 0.2 \\log_{10}(P_{mod}+1)) \\times C_{eff} \\times C_{cmp}}{T/8}
+$$
+> 说明：
+>
+> * 对数项使得代码量和文件数带来递减效益，防止行数堆积造成虚高。
+> * $T/8$ 用于时间归一化（以 8 小时为标准工作日）。
+> * 系数可调：`0.4/0.3/0.2` 权重适合中型项目（如C++工程）。
+参考解释表
+
+| PEI 值 | 效率等级  | 特征描述           |
+| ----- | ----- | -------------- |
+| 0–3   | 💤 低效 | 频繁上下文切换、非核心任务  |
+| 4–6   | ⚙️ 正常 | 持续推进、稳定产出      |
+| 7–9   | 🚀 高效 | 模块重构、系统优化或关键修复 |
+| ≥10   | 🧠 卓越 | 自动化、生成式任务、集中攻坚 |
+        """
+
+def get_github_events(repo_full_name: str, token: str, since_dt: datetime, until_dt: datetime) -> List[Dict]:
+    """
+    从 GitHub 获取指定时间范围内的 commits 和 PRs。
+    
+    Args:
+        repo_full_name: 仓库全名，格式为 "OWNER/REPO"
+        token: GitHub Personal Access Token
+        since_dt: 起始时间（datetime，建议带时区）
+        until_dt: 结束时间（datetime，建议带时区）
+    
+    Returns:
+        事件列表，格式与本地 commit 兼容：
+        [{
+            "sha": commit_sha 或 "PR#123",
+            "author_name": author_name,
+            "author_email": "" (远程仓库通常没有email),
+            "date": date_str (ISO格式字符串),
+            "date_epoch": epoch_seconds,
+            "message": commit_message 或 pr_title,
+            "type": "commit" 或 "pr"
+        }, ...]
+    """
+    if not GITHUB_AVAILABLE:
+        raise ImportError("PyGithub 未安装，请运行: pip install PyGithub")
+    
+    events: List[Dict] = []
+    # 使用新的认证方式（避免 deprecation warning）
+    if GITHUB_AUTH_AVAILABLE:
+        auth = Auth.Token(token)
+        g = Github(auth=auth)
+    else:
+        # 旧版本 PyGithub，使用旧的方式
+        g = Github(token)
+    
+    try:
+        repo = g.get_repo(repo_full_name)
+    except Exception as e:
+        error_msg = str(e)
+        if "403" in error_msg or "Forbidden" in error_msg:
+            raise Exception(
+                f"无法访问仓库 {repo_full_name}。可能原因：\n"
+                f"1. 仓库是私有的，且 token 没有访问权限\n"
+                f"2. token 权限不足（需要 'repo' 权限来访问私有仓库）\n"
+                f"3. 仓库不存在或 token 无效\n"
+                f"请检查 token 权限设置：https://github.com/settings/tokens"
+            )
+        raise
+    
+    # 确保时区为 UTC
+    since_utc = since_dt.replace(tzinfo=timezone.utc) if since_dt.tzinfo is None else since_dt.astimezone(timezone.utc)
+    until_utc = until_dt.replace(tzinfo=timezone.utc) if until_dt.tzinfo is None else until_dt.astimezone(timezone.utc)
+    
+    # 1) 获取 Commits
+    try:
+        commits_iter = repo.get_commits(since=since_utc, until=until_utc)
+        for c in commits_iter:
+            commit_date = c.commit.author.date
+            if commit_date.tzinfo is None:
+                commit_date = commit_date.replace(tzinfo=timezone.utc)
+            
+            # 只包含指定时间范围内的提交
+            if since_utc <= commit_date <= until_utc:
+                message = c.commit.message.splitlines()[0] if c.commit.message else ""
+                # 尝试获取作者名称：先尝试 name，再尝试 committer 的 login
+                author_name = getattr(c.commit.author, "name", None)
+                if not author_name:
+                    try:
+                        author_name = c.commit.committer.login if hasattr(c.commit.committer, "login") else "Unknown"
+                    except:
+                        author_name = "Unknown"
+                events.append({
+                    "sha": c.sha,
+                    "author_name": author_name or "Unknown",
+                    "author_email": "",  # GitHub API 通常不提供邮箱
+                    "date": commit_date.isoformat(),
+                    "date_epoch": int(commit_date.timestamp()),
+                    "message": message,
+                    "type": "commit"
+                })
+    except Exception as e:
+        error_msg = str(e)
+        if "403" in error_msg or "Forbidden" in error_msg:
+            print(f"Warning: 获取 GitHub 仓库 {repo_full_name} 的 commits 失败: 权限不足")
+            print(f"提示: 如果是私有仓库，请确保 token 具有 'repo' 权限")
+            print(f"提示: 如果是公开仓库，可能是 token 权限问题，或仓库不存在")
+        elif "404" in error_msg or "Not Found" in error_msg:
+            print(f"Warning: 获取 GitHub 仓库 {repo_full_name} 的 commits 失败: 仓库未找到")
+        else:
+            print(f"Warning: 获取 GitHub commits 失败: {e}")
+    
+    # 2) 获取 PRs（通过搜索接口，按 updated 时间范围）
+    try:
+        query = f"repo:{repo_full_name} is:pr updated:{since_utc.date()}..{until_utc.date()}"
+        for pr in g.search_issues(query=query):
+            pr_updated = pr.updated_at
+            if pr_updated.tzinfo is None:
+                pr_updated = pr_updated.replace(tzinfo=timezone.utc)
+            
+            # 检查是否在时间范围内
+            if since_utc <= pr_updated <= until_utc:
+                events.append({
+                    "sha": f"PR#{pr.number}",
+                    "author_name": pr.user.login if pr.user else "Unknown",
+                    "author_email": "",
+                    "date": pr_updated.isoformat(),
+                    "date_epoch": int(pr_updated.timestamp()),
+                    "message": pr.title,
+                    "type": "pr"
+                })
+    except Exception as e:
+        error_msg = str(e)
+        if "403" in error_msg or "Forbidden" in error_msg:
+            print(f"Warning: 获取 GitHub 仓库 {repo_full_name} 的 PRs 失败: 权限不足")
+            print(f"提示: 请确保 token 具有访问仓库的权限")
+        elif "404" in error_msg or "Not Found" in error_msg:
+            print(f"Warning: 获取 GitHub 仓库 {repo_full_name} 的 PRs 失败: 仓库未找到")
+        else:
+            print(f"Warning: 获取 GitHub PRs 失败: {e}")
+    
+    # 按时间排序
+    events.sort(key=lambda e: e["date_epoch"])
+    return events
+
+def get_gitee_events(repo_full_name: str, token: str, since_dt: datetime, until_dt: datetime) -> List[Dict]:
+    """
+    从 Gitee 获取指定时间范围内的 commits 和 PRs（MRs）。
+    
+    Args:
+        repo_full_name: 仓库全名，格式为 "OWNER/REPO"
+        token: Gitee Personal Access Token
+        since_dt: 起始时间（datetime，建议带时区）
+        until_dt: 结束时间（datetime，建议带时区）
+    
+    Returns:
+        事件列表，格式与本地 commit 兼容
+    """
+    events: List[Dict] = []
+    
+    # 确保时区为 UTC
+    since_utc = since_dt.replace(tzinfo=timezone.utc) if since_dt.tzinfo is None else since_dt.astimezone(timezone.utc)
+    until_utc = until_dt.replace(tzinfo=timezone.utc) if until_dt.tzinfo is None else until_dt.astimezone(timezone.utc)
+    
+    owner, repo_name = repo_full_name.split("/", 1)
+    base_url = "https://gitee.com/api/v5"
+    headers = {"Authorization": f"token {token}"} if token else {}
+    
+    # 1) 获取 Commits
+    try:
+        commits_url = f"{base_url}/repos/{owner}/{repo_name}/commits"
+        params = {
+            "since": since_utc.isoformat(),
+            "until": until_utc.isoformat(),
+            "per_page": 100,
+            "page": 1
+        }
+        
+        page = 1
+        while True:
+            params["page"] = page
+            resp = requests.get(commits_url, headers=headers, params=params, timeout=30)
+            resp.raise_for_status()
+            commits_data = resp.json()
+            
+            if not commits_data:
+                break
+            
+            for c in commits_data:
+                commit_date_str = c.get("commit", {}).get("author", {}).get("date", "")
+                if commit_date_str:
+                    try:
+                        commit_date = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00"))
+                        if commit_date.tzinfo is None:
+                            commit_date = commit_date.replace(tzinfo=timezone.utc)
+                        
+                        # 只包含指定时间范围内的提交
+                        if since_utc <= commit_date <= until_utc:
+                            message = c.get("commit", {}).get("message", "").splitlines()[0] if c.get("commit", {}).get("message") else ""
+                            author_info = c.get("commit", {}).get("author", {})
+                            author_name = author_info.get("name", "Unknown")
+                            
+                            events.append({
+                                "sha": c.get("sha", "")[:40],
+                                "author_name": author_name,
+                                "author_email": author_info.get("email", ""),
+                                "date": commit_date.isoformat(),
+                                "date_epoch": int(commit_date.timestamp()),
+                                "message": message,
+                                "type": "commit"
+                            })
+                    except Exception as e:
+                        print(f"Warning: 解析 Gitee commit 时间失败: {e}")
+                        continue
+            
+            if len(commits_data) < 100:
+                break
+            page += 1
+    except Exception as e:
+        print(f"Warning: 获取 Gitee commits 失败: {e}")
+    
+    # 2) 获取 Pull Requests (MRs)
+    try:
+        mrs_url = f"{base_url}/repos/{owner}/{repo_name}/pulls"
+        params = {
+            "state": "all",
+            "sort": "updated",
+            "direction": "desc",
+            "per_page": 100,
+            "page": 1
+        }
+        
+        page = 1
+        while True:
+            params["page"] = page
+            resp = requests.get(mrs_url, headers=headers, params=params, timeout=30)
+            resp.raise_for_status()
+            mrs_data = resp.json()
+            
+            if not mrs_data:
+                break
+            
+            for mr in mrs_data:
+                updated_str = mr.get("updated_at", "")
+                if updated_str:
+                    try:
+                        updated_date = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+                        if updated_date.tzinfo is None:
+                            updated_date = updated_date.replace(tzinfo=timezone.utc)
+                        
+                        # 只包含指定时间范围内的 PR
+                        if since_utc <= updated_date <= until_utc:
+                            events.append({
+                                "sha": f"PR#{mr.get('number', '')}",
+                                "author_name": mr.get("user", {}).get("login", "Unknown"),
+                                "author_email": "",
+                                "date": updated_date.isoformat(),
+                                "date_epoch": int(updated_date.timestamp()),
+                                "message": mr.get("title", ""),
+                                "type": "pr"
+                            })
+                    except Exception as e:
+                        print(f"Warning: 解析 Gitee PR 时间失败: {e}")
+                        continue
+            
+            # 如果最早的 PR 更新时间早于查询范围，可以提前退出
+            try:
+                earliest_updated = min(
+                    (datetime.fromisoformat(mr.get("updated_at", "").replace("Z", "+00:00")) 
+                     for mr in mrs_data if mr.get("updated_at")),
+                    default=None
+                )
+                if earliest_updated and earliest_updated < since_utc:
+                    break
+            except Exception:
+                pass  # 如果解析失败，继续下一页
+            
+            if len(mrs_data) < 100:
+                break
+            page += 1
+    except Exception as e:
+        print(f"Warning: 获取 Gitee PRs 失败: {e}")
+    
+    # 按时间排序
+    events.sort(key=lambda e: e["date_epoch"])
+    return events
 
 def parse_git_log(raw):
     # 我们使用 git log 输出以 \x1e（record sep）分割 commit，以 \x1f 字段分割
@@ -316,6 +624,8 @@ def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Di
     
     # 各项目详细统计
     for repo_name, grouped in repo_to_grouped.items():
+        if len(grouped) ==0:
+            continue
         lines.append(f"\n# 项目：{repo_name}")
         sessions = repo_to_sessions[repo_name]
         if sessions:
@@ -401,39 +711,13 @@ def generate_summary_with_openai(
                 if files:
                     context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
         commit_context = "\n".join(context_lines)
-
+    if len(commit_context) <10:
+        return "今天无工作，无法生成工作总结。"
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     if author:
         system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"
         user_msg = f"请根据以下 commit 记录生成{author}工作总结：\n\n{commit_context}"
-        user_msg += """\n\n最后计算一下效率指数（PEI）：
-        设：
-* $N_c$ = 当日提交次数
-* $L_{add}$ = 新增代码行数
-* $L_{del}$ = 删除代码行数
-* $T$ = 实际投入时间（小时，排除并行重叠）
-* $P_{mod}$ = 修改文件数
-* $C_{eff}$ = 编译通过率（或测试通过率，0~1）
-* $C_{cmp}$ = 代码复杂度系数（0.5~1.5，可依据任务类型调整）
----
-公式：
-$$
-\\text{PEI} = \\frac{(0.4 N_c + 0.3 \\log_{10}(L_{add}+L_{del}) + 0.2 \\log_{10}(P_{mod}+1)) \\times C_{eff} \\times C_{cmp}}{T/8}
-$$
-> 说明：
->
-> * 对数项使得代码量和文件数带来递减效益，防止行数堆积造成虚高。
-> * $T/8$ 用于时间归一化（以 8 小时为标准工作日）。
-> * 系数可调：`0.4/0.3/0.2` 权重适合中型项目（如C++工程）。
-参考解释表
-
-| PEI 值 | 效率等级  | 特征描述           |
-| ----- | ----- | -------------- |
-| 0–3   | 💤 低效 | 频繁上下文切换、非核心任务  |
-| 4–6   | ⚙️ 正常 | 持续推进、稳定产出      |
-| 7–9   | 🚀 高效 | 模块重构、系统优化或关键修复 |
-| ≥10   | 🧠 卓越 | 自动化、生成式任务、集中攻坚 |
-        """
+        user_msg += PEI
     else:
         user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
     
@@ -486,39 +770,13 @@ def generate_summary_with_deepseek(
                 if files:
                     context_lines.append(f"  修改的文件: {', '.join(files[:20])}{' ...' if len(files) > 20 else ''}")
         commit_context = "\n".join(context_lines)
-        
+    if len(commit_context) <10:
+        return "今天无工作，无法生成工作总结。"
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     if author:
         system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"
         user_msg = f"请根据以下 commit 记录生成{author}工作总结：\n\n{commit_context}"
-        user_msg += """\n\n最后计算一下效率指数（PEI）：
-        设：
-* $N_c$ = 当日提交次数
-* $L_{add}$ = 新增代码行数
-* $L_{del}$ = 删除代码行数
-* $T$ = 实际投入时间（小时，排除并行重叠）
-* $P_{mod}$ = 修改文件数
-* $C_{eff}$ = 编译通过率（或测试通过率，0~1）
-* $C_{cmp}$ = 代码复杂度系数（0.5~1.5，可依据任务类型调整）
----
-公式：
-$$
-\\text{PEI} = \\frac{(0.4 N_c + 0.3 \\log_{10}(L_{add}+L_{del}) + 0.2 \\log_{10}(P_{mod}+1)) \\times C_{eff} \\times C_{cmp}}{T/8}
-$$
-> 说明：
->
-> * 对数项使得代码量和文件数带来递减效益，防止行数堆积造成虚高。
-> * $T/8$ 用于时间归一化（以 8 小时为标准工作日）。
-> * 系数可调：`0.4/0.3/0.2` 权重适合中型项目（如C++工程）。
-参考解释表
-
-| PEI 值 | 效率等级  | 特征描述           |
-| ----- | ----- | -------------- |
-| 0–3   | 💤 低效 | 频繁上下文切换、非核心任务  |
-| 4–6   | ⚙️ 正常 | 持续推进、稳定产出      |
-| 7–9   | 🚀 高效 | 模块重构、系统优化或关键修复 |
-| ≥10   | 🧠 卓越 | 自动化、生成式任务、集中攻坚 |
-        """
+        user_msg += PEI
     else:
         user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
     
@@ -673,6 +931,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate work log from git commits")
     parser.add_argument('--repo', type=str, default=None, help='Path to git repository (single)')
     parser.add_argument('--repos', type=str, default=None, help='Multiple repositories, comma-separated')
+    parser.add_argument('--github', type=str, default=None, help='GitHub repository (format: OWNER/REPO, comma-separated for multiple)')
+    parser.add_argument('--gitee', type=str, default=None, help='Gitee repository (format: OWNER/REPO, comma-separated for multiple)')
+    parser.add_argument('--github-token', type=str, default=None, help='GitHub token (or set GITHUB_TOKEN env var)')
+    parser.add_argument('--gitee-token', type=str, default=None, help='Gitee token (or set GITEE_TOKEN env var)')
     parser.add_argument('--since', type=str, default=None, help='Start datetime (ISO or YYYY-MM-DD)')
     parser.add_argument('--until', type=str, default=None, help='End datetime (ISO or YYYY-MM-DD)')
     parser.add_argument('--days', type=int, default=None, help='If set, use last N days ending today')
@@ -705,12 +967,25 @@ def parse_date_input(value: Optional[str], default_dt: Optional[datetime]) -> Op
 def git2work():
     args = parse_args()
     repo_paths: List[str] = []
+    github_repos: List[str] = []
+    gitee_repos: List[str] = []
+    
+    # 解析本地仓库
     if args.repos:
         repo_paths = [p.strip() for p in args.repos.split(',') if p.strip()]
     elif args.repo:
         repo_paths = [args.repo]
-    else:
-        # fallback to default single repo if none provided
+    
+    # 解析 GitHub 仓库
+    if args.github:
+        github_repos = [r.strip() for r in args.github.split(',') if r.strip()]
+    
+    # 解析 Gitee 仓库
+    if args.gitee:
+        gitee_repos = [r.strip() for r in args.gitee.split(',') if r.strip()]
+    
+    # 如果没有任何仓库指定，使用默认本地仓库
+    if not repo_paths and not github_repos and not gitee_repos:
         repo_paths = ["/mnt/d/works/RayTracy"]
 
     now = datetime.now()
@@ -725,24 +1000,80 @@ def git2work():
         if end is not None:
             end = end.replace(hour=23, minute=59, second=59, microsecond=0)
 
-    multi_project = len(repo_paths) > 1
+    # 获取 GitHub token
+    github_token = args.github_token or GITHUB_TOKEN
+    if github_repos and not github_token:
+        print("Warning: GitHub 仓库需要 token，请设置 --github-token 或环境变量 GITHUB_TOKEN")
+        github_repos = []  # 跳过 GitHub 仓库
+    
+    # 获取 Gitee token
+    gitee_token = args.gitee_token or GITEE_TOKEN
+    if gitee_repos and not gitee_token:
+        print("Warning: Gitee 仓库需要 token，请设置 --gitee-token 或环境变量 GITEE_TOKEN")
+        gitee_repos = []  # 跳过 Gitee 仓库
+
+    # 计算实际可用的仓库总数
+    total_repos = len(repo_paths) + len(github_repos) + len(gitee_repos)
+    # 如果任何一个类型有多个仓库，或者总仓库数大于1，都进入多项目模式
+    multi_project = (len(repo_paths) > 1 or len(github_repos) > 1 or len(gitee_repos) > 1 or total_repos > 1)
 
     if not multi_project:
-        repo = repo_paths[0]
-        commits = get_commits_between(repo, start, end)
-        if args.author:
-            author_lower = args.author.lower()
-            commits = [c for c in commits if author_lower in c['author_name'].lower() or author_lower in c['author_email'].lower()]
+        # 单项目模式（只有单个仓库或单个来自不同位置的仓库）
+        commits: List[Dict] = []
         details: Dict[str, Tuple[List[str], int, int, str]] = {}
-        for c in commits:
-            files, ins, dels = get_commit_numstat(repo, c['sha'])
-            body = get_commit_body(repo, c['sha'])
-            details[c['sha']] = (files, ins, dels, body)
+        
+        # 处理本地仓库（最多一个）
+        if repo_paths:
+            repo = repo_paths[0]
+            commits = get_commits_between(repo, start, end)
+            if args.author:
+                author_lower = args.author.lower()
+                commits = [c for c in commits if author_lower in c['author_name'].lower() or author_lower in c['author_email'].lower()]
+            for c in commits:
+                files, ins, dels = get_commit_numstat(repo, c['sha'])
+                body = get_commit_body(repo, c['sha'])
+                details[c['sha']] = (files, ins, dels, body)
+        
+        # 处理 GitHub 仓库（最多一个）
+        if github_repos and github_token:
+            repo_name = github_repos[0]
+            try:
+                remote_commits = get_github_events(repo_name, github_token, start, end)
+                if args.author:
+                    author_lower = args.author.lower()
+                    remote_commits = [c for c in remote_commits if author_lower in c['author_name'].lower()]
+                commits.extend(remote_commits)
+                # 远程仓库无法获取 numstat，使用占位值
+                for c in remote_commits:
+                    details[c['sha']] = ([], 0, 0, c['message'])
+            except Exception as e:
+                print(f"Error: 获取 GitHub 仓库 {repo_name} 失败: {e}")
+        
+        # 处理 Gitee 仓库（最多一个）
+        if gitee_repos and gitee_token:
+            repo_name = gitee_repos[0]
+            try:
+                remote_commits = get_gitee_events(repo_name, gitee_token, start, end)
+                if args.author:
+                    author_lower = args.author.lower()
+                    remote_commits = [c for c in remote_commits if author_lower in c['author_name'].lower()]
+                commits.extend(remote_commits)
+                # 远程仓库无法获取 numstat，使用占位值
+                for c in remote_commits:
+                    details[c['sha']] = ([], 0, 0, c['message'])
+            except Exception as e:
+                print(f"Error: 获取 Gitee 仓库 {repo_name} 失败: {e}")
+        
+        # 按时间排序所有 commits
+        commits.sort(key=lambda c: commit_time_dt(c))
         grouped = group_commits_by_date(commits)
     else:
+        # 多项目模式
         repo_to_commits: Dict[str, List[Dict]] = {}
         repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]] = {}
         repo_to_grouped: Dict[str, Dict[str, List[Dict]]] = {}
+        
+        # 处理本地仓库
         for repo in repo_paths:
             commits = get_commits_between(repo, start, end)
             if args.author:
@@ -756,6 +1087,43 @@ def git2work():
                 details_map[c['sha']] = (files, ins, dels, body)
             repo_to_details[repo] = details_map
             repo_to_grouped[repo] = group_commits_by_date(commits)
+        
+        # 处理 GitHub 仓库
+        for repo_name in github_repos:
+            if github_token:
+                try:
+                    commits = get_github_events(repo_name, github_token, start, end)
+                    if args.author:
+                        author_lower = args.author.lower()
+                        commits = [c for c in commits if author_lower in c['author_name'].lower()]
+                    repo_to_commits[repo_name] = commits
+                    details_map: Dict[str, Tuple[List[str], int, int, str]] = {}
+                    # 远程仓库无法获取 numstat，使用占位值
+                    for c in commits:
+                        details_map[c['sha']] = ([], 0, 0, c['message'])
+                    repo_to_details[repo_name] = details_map
+                    repo_to_grouped[repo_name] = group_commits_by_date(commits)
+                except Exception as e:
+                    print(f"Error: 获取 GitHub 仓库 {repo_name} 失败: {e}")
+        
+        # 处理 Gitee 仓库
+        for repo_name in gitee_repos:
+            if gitee_token:
+                try:
+                    commits = get_gitee_events(repo_name, gitee_token, start, end)
+                    if args.author:
+                        author_lower = args.author.lower()
+                        commits = [c for c in commits if author_lower in c['author_name'].lower()]
+                    repo_to_commits[repo_name] = commits
+                    details_map: Dict[str, Tuple[List[str], int, int, str]] = {}
+                    # 远程仓库无法获取 numstat，使用占位值
+                    for c in commits:
+                        details_map[c['sha']] = ([], 0, 0, c['message'])
+                    repo_to_details[repo_name] = details_map
+                    repo_to_grouped[repo_name] = group_commits_by_date(commits)
+                except Exception as e:
+                    print(f"Error: 获取 Gitee 仓库 {repo_name} 失败: {e}")
+        
         grouped = repo_to_grouped  # type: ignore
         details = repo_to_details  # type: ignore
 
