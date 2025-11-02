@@ -438,6 +438,96 @@ def get_commit_body(repo_path: str, sha: str) -> str:
     body = repo.git.show(sha, '-s', '--format=%B')
     return body.strip('\n')
 
+def get_pull_operations(repo_path: str, since_dt: datetime, until_dt: datetime) -> List[datetime]:
+    """
+    获取指定时间范围内的 git pull/fetch 操作时间。
+    
+    使用 git reflog 获取操作历史，查找 pull、fetch、merge 等操作。
+    reflog 格式: <hash> HEAD@{<timestamp>}: <operation>: <message>
+    
+    Args:
+        repo_path: Git 仓库路径
+        since_dt: 起始时间
+        until_dt: 结束时间
+    
+    Returns:
+        pull 操作时间列表（按时间排序）
+    """
+    try:
+        repo = Repo(repo_path)
+        
+        since_iso = since_dt.isoformat(sep=' ')
+        until_iso = until_dt.isoformat(sep=' ')
+        
+        # 获取所有 reflog 记录（使用 HEAD@{date} 格式）
+        try:
+            # 尝试获取 reflog（某些仓库可能没有 reflog）
+            # reflog 输出格式: <hash> HEAD@{2025-11-03 01:26:20 +0800}: pull: Fast-forward
+            reflog_output = repo.git.reflog(
+                '--date=iso',
+                f'--since={since_iso}',
+                f'--until={until_iso}'
+            )
+        except Exception:
+            # 如果没有 reflog 或获取失败，返回空列表
+            return []
+        
+        if not reflog_output:
+            return []
+        
+        pull_times: List[datetime] = []
+        
+        # 解析 reflog 输出
+        # 格式: <hash> HEAD@{<timestamp>}: <operation>: <message>
+        # 示例: 9bef194 HEAD@{2025-11-03 01:26:20 +0800}: pull: Fast-forward
+        for line in reflog_output.splitlines():
+            if not line.strip():
+                continue
+            
+            # 使用正则表达式提取时间戳和操作信息
+            # 匹配格式: HEAD@{YYYY-MM-DD HH:MM:SS +TZ}: <operation>:
+            match = re.search(r'HEAD@\{([^\}]+)\}:\s*([^:]+):', line)
+            if match:
+                date_str = match.group(1).strip()
+                operation = match.group(2).strip().lower()
+                
+                # 检查是否是 pull/fetch 相关操作
+                # pull 通常包含 "pull", "fetch", "merge" 等关键词
+                is_pull_related = any(keyword in operation for keyword in [
+                    'pull', 'fetch', 'merge', 'update', 'rebase'
+                ])
+                
+                # 排除一些不相关的操作（如 checkout, commit, reset 等）
+                excluded_keywords = ['checkout', 'commit', 'reset', 'branch', 'switch']
+                if any(keyword in operation for keyword in excluded_keywords):
+                    is_pull_related = False
+                
+                if is_pull_related:
+                    try:
+                        # 解析日期字符串（ISO 格式：2025-11-03 01:26:20 +0800）
+                        pull_time = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S %z")
+                        # 转换为本地时间（去掉时区信息以便比较）
+                        pull_time = pull_time.astimezone().replace(tzinfo=None)
+                        
+                        # 确保在时间范围内
+                        since_local = since_dt.replace(tzinfo=None) if since_dt.tzinfo else since_dt
+                        until_local = until_dt.replace(tzinfo=None) if until_dt.tzinfo else until_dt
+                        
+                        if since_local <= pull_time <= until_local:
+                            pull_times.append(pull_time)
+                    except Exception as e:
+                        # 解析失败，跳过
+                        continue
+        
+        # 去重并排序（从早到晚）
+        pull_times = sorted(list(set(pull_times)))
+        return pull_times
+        
+    except Exception as e:
+        # 获取失败，返回空列表（不阻断主流程）
+        print(f"Warning: 获取仓库 {repo_path} 的 pull 记录失败: {e}")
+        return []
+
 def group_commits_by_date(commits: List[Dict]) -> Dict[str, List[Dict]]:
     groups: Dict[str, List[Dict]] = defaultdict(list)
     for c in commits:
@@ -465,26 +555,72 @@ def commit_time_dt(c: Dict) -> datetime:
         except Exception:
             return datetime.fromisoformat(ds.replace(' ', 'T').split(' +')[0])
 
-def compute_work_sessions(commits: List[Dict], gap_minutes: int = 60) -> List[Dict]:
+def compute_work_sessions(commits: List[Dict], gap_minutes: int = 60, pull_times: Optional[List[datetime]] = None) -> List[Dict]:
+    """
+    计算工作会话，支持使用 pull 时间作为会话开始时间。
+    
+    Args:
+        commits: commit 列表
+        gap_minutes: 会话间隔（分钟）
+        pull_times: pull 操作时间列表（可选）
+    
+    Returns:
+        工作会话列表
+    """
     if not commits:
         return []
     items = sorted(commits, key=lambda c: commit_time_dt(c))
     sessions: List[Dict] = []
     gap = timedelta(minutes=gap_minutes)
+    
+    # 如果有 pull 记录，用于调整会话开始时间
+    pull_times_sorted = sorted(pull_times) if pull_times else []
+    
     current = {
         'start': commit_time_dt(items[0]),
         'end': commit_time_dt(items[0]),
         'commits': [items[0]],
     }
+    
+    # 为第一个会话查找对应的 pull 时间
+    # 如果第一个 commit 之前有 pull 操作，且时间间隔合理（不超过 gap_minutes），使用 pull 时间作为开始
+    first_commit_time = commit_time_dt(items[0])
+    if pull_times_sorted:
+        # 查找第一个 commit 之前最近的 pull 操作
+        # 找到第一个在 commit 时间之前的 pull（如果有的话）
+        for pull_time in reversed(pull_times_sorted):
+            if pull_time <= first_commit_time:
+                # 检查时间间隔是否合理（pull 时间应该在 commit 之前，但不要相隔太久）
+                time_diff = (first_commit_time - pull_time).total_seconds() / 60
+                # 如果 pull 在 commit 之前且在合理范围内（比如 2 小时内），使用 pull 时间
+                if time_diff > 0 and time_diff <= 120:  # 2 小时内的 pull 视为有效
+                    current['start'] = pull_time
+                    break
+    
     for c in items[1:]:
         t = commit_time_dt(c)
         if t - commit_time_dt(current['commits'][-1]) <= gap:
             current['end'] = t
             current['commits'].append(c)
         else:
+            # 会话结束，计算时长
             current['duration_minutes'] = max(1, int((current['end'] - current['start']).total_seconds() // 60))
             sessions.append(current)
+            
+            # 开始新会话
             current = {'start': t, 'end': t, 'commits': [c]}
+            
+            # 为新会话查找对应的 pull 时间
+            if pull_times_sorted:
+                # 查找这个 commit 之前最近的 pull 操作
+                for pull_time in reversed(pull_times_sorted):
+                    if pull_time <= t:
+                        time_diff = (t - pull_time).total_seconds() / 60
+                        if time_diff > 0 and time_diff <= 120:  # 2 小时内的 pull 视为有效
+                            current['start'] = pull_time
+                            break
+    
+    # 处理最后一个会话
     current['duration_minutes'] = max(1, int((current['end'] - current['start']).total_seconds() // 60))
     sessions.append(current)
     return sessions
@@ -599,7 +735,7 @@ def detect_parallel_sessions(repo_to_sessions: Dict[str, List[Dict]]) -> List[Di
     
     return final_merged
 
-def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], gap_minutes: int = 60) -> str:
+def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], gap_minutes: int = 60, repo_to_pull_times: Optional[Dict[str, List[datetime]]] = None) -> str:
     lines: List[str] = []
     
     # 先计算所有项目的会话，用于检测并行工作
@@ -608,7 +744,9 @@ def build_commit_context_by_project(repo_to_grouped: Dict[str, Dict[str, List[Di
         flat_commits: List[Dict] = []
         for items in grouped.values():
             flat_commits.extend(items)
-        sessions = compute_work_sessions(flat_commits, gap_minutes)
+        # 获取该仓库的 pull 时间（如果是本地仓库）
+        pull_times = repo_to_pull_times.get(repo_name, []) if repo_to_pull_times else []
+        sessions = compute_work_sessions(flat_commits, gap_minutes, pull_times)
         repo_to_sessions[repo_name] = sessions
     
     # 检测跨项目并行工作时间
@@ -673,7 +811,8 @@ def generate_summary_with_openai(
     openai_api_key: Optional[str] = None,
     model: str = "gpt-4o-mini",
     author: Optional[str] = None,
-    gap_minutes: int = 60
+    gap_minutes: int = 60,
+    repo_to_pull_times: Optional[Dict[str, List[datetime]]] = None
 ) -> str:
     """
     使用 OpenAI API 生成工作总结。
@@ -693,7 +832,8 @@ def generate_summary_with_openai(
         # 多项目：grouped: repo -> {day -> commits}
         repo_to_grouped = grouped  # type: ignore
         repo_to_details = details  # type: ignore
-        commit_context = build_commit_context_by_project(repo_to_grouped, repo_to_details, gap_minutes)  # type: ignore
+        # 使用传入的 repo_to_pull_times（如果提供）
+        commit_context = build_commit_context_by_project(repo_to_grouped, repo_to_details, gap_minutes, repo_to_pull_times)  # type: ignore
     else:
         context_lines = []
         for day, items in grouped.items():
@@ -741,7 +881,8 @@ def generate_summary_with_deepseek(
     deepseek_api_key: Optional[str] = None,
     model: str = "deepseek-chat",
     author: Optional[str] = None,
-    gap_minutes: int = 60
+    gap_minutes: int = 60,
+    repo_to_pull_times: Optional[Dict[str, List[datetime]]] = None
 ) -> str:
     """
     使用 DeepSeek API 生成工作总结（OpenAI 兼容的 Chat Completions 格式）。
@@ -752,7 +893,8 @@ def generate_summary_with_deepseek(
 
     # 构建上下文（支持多项目）
     if isinstance(grouped, dict) and grouped and all(isinstance(v, dict) for v in grouped.values()):
-        commit_context = build_commit_context_by_project(grouped, details, gap_minutes)  # type: ignore
+        # 使用传入的 repo_to_pull_times（如果提供）
+        commit_context = build_commit_context_by_project(grouped, details, gap_minutes, repo_to_pull_times)  # type: ignore
     else:
         context_lines = []
         for day, items in grouped.items():
@@ -854,7 +996,7 @@ def render_markdown_worklog(
     
     return "\n".join(lines)
 
-def render_multi_project_worklog(title: str, repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], add_summary: bool = False, summary_text: Optional[str] = None, gap_minutes: int = 60) -> str:
+def render_multi_project_worklog(title: str, repo_to_grouped: Dict[str, Dict[str, List[Dict]]], repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]], add_summary: bool = False, summary_text: Optional[str] = None, gap_minutes: int = 60, repo_to_pull_times: Optional[Dict[str, List[datetime]]] = None) -> str:
     lines: List[str] = []
     lines.append(f"# {title}")
     lines.append("")
@@ -868,7 +1010,9 @@ def render_multi_project_worklog(title: str, repo_to_grouped: Dict[str, Dict[str
         flat_commits: List[Dict] = []
         for items in grouped.values():
             flat_commits.extend(items)
-        sessions = compute_work_sessions(flat_commits, gap_minutes)
+        # 获取该仓库的 pull 时间（如果是本地仓库）
+        pull_times = repo_to_pull_times.get(repo_name, []) if repo_to_pull_times else []
+        sessions = compute_work_sessions(flat_commits, gap_minutes, pull_times)
         repo_to_sessions[repo_name] = sessions
     
     parallel_periods = detect_parallel_sessions(repo_to_sessions)
@@ -1021,6 +1165,7 @@ def git2work():
         # 单项目模式（只有单个仓库或单个来自不同位置的仓库）
         commits: List[Dict] = []
         details: Dict[str, Tuple[List[str], int, int, str]] = {}
+        pull_times: List[datetime] = []  # 用于单项目模式的 pull 时间
         
         # 处理本地仓库（最多一个）
         if repo_paths:
@@ -1029,6 +1174,8 @@ def git2work():
             if args.author:
                 author_lower = args.author.lower()
                 commits = [c for c in commits if author_lower in c['author_name'].lower() or author_lower in c['author_email'].lower()]
+            # 获取 pull 操作时间
+            pull_times = get_pull_operations(repo, start, end)
             for c in commits:
                 files, ins, dels = get_commit_numstat(repo, c['sha'])
                 body = get_commit_body(repo, c['sha'])
@@ -1067,11 +1214,16 @@ def git2work():
         # 按时间排序所有 commits
         commits.sort(key=lambda c: commit_time_dt(c))
         grouped = group_commits_by_date(commits)
+        
+        # 为单项目模式初始化 repo_to_pull_times_multi
+        # 注意：单项目模式不显示会话统计，但保留变量以便一致性
+        repo_to_pull_times_multi = None  # type: ignore
     else:
         # 多项目模式
         repo_to_commits: Dict[str, List[Dict]] = {}
         repo_to_details: Dict[str, Dict[str, Tuple[List[str], int, int, str]]] = {}
         repo_to_grouped: Dict[str, Dict[str, List[Dict]]] = {}
+        repo_to_pull_times: Dict[str, List[datetime]] = {}  # 存储每个本地仓库的 pull 时间
         
         # 处理本地仓库
         for repo in repo_paths:
@@ -1079,6 +1231,9 @@ def git2work():
             if args.author:
                 author_lower = args.author.lower()
                 commits = [c for c in commits if author_lower in c['author_name'].lower() or author_lower in c['author_email'].lower()]
+            # 获取 pull 操作时间（仅本地仓库）
+            pull_times = get_pull_operations(repo, start, end)
+            repo_to_pull_times[repo] = pull_times
             repo_to_commits[repo] = commits
             details_map: Dict[str, Tuple[List[str], int, int, str]] = {}
             for c in commits:
@@ -1126,6 +1281,8 @@ def git2work():
         
         grouped = repo_to_grouped  # type: ignore
         details = repo_to_details  # type: ignore
+        # 保存 repo_to_pull_times 以便后续使用
+        repo_to_pull_times_multi = repo_to_pull_times  # type: ignore
 
     title = args.title or (f"Work Log: {start.date()} to {end.date()}" if start and end else "Work Log")
     
@@ -1139,6 +1296,9 @@ def git2work():
             with open(args.system_prompt_file, 'r', encoding='utf-8') as f:
                 system_prompt = f.read()
         
+        # 准备 repo_to_pull_times（仅在多项目模式下使用）
+        repo_to_pull_times_for_summary = repo_to_pull_times_multi if multi_project else None
+        
         if getattr(args, 'provider', 'openai') == 'deepseek':
             summary_text = generate_summary_with_deepseek(
                 grouped,  # type: ignore
@@ -1147,7 +1307,8 @@ def git2work():
                 deepseek_api_key=args.deepseek_key,
                 model=args.deepseek_model,
                 author=args.author,
-                gap_minutes=args.session_gap_minutes
+                gap_minutes=args.session_gap_minutes,
+                repo_to_pull_times=repo_to_pull_times_for_summary
             )
         else:
             summary_text = generate_summary_with_openai(
@@ -1157,14 +1318,15 @@ def git2work():
                 openai_api_key=args.openai_key,
                 model=args.openai_model,
                 author=args.author,
-                gap_minutes=args.session_gap_minutes
+                gap_minutes=args.session_gap_minutes,
+                repo_to_pull_times=repo_to_pull_times_for_summary
             )
         print("AI 总结生成完成")
     
     if not multi_project:
         md = render_markdown_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text)  # type: ignore
     else:
-        md = render_multi_project_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text, gap_minutes=args.session_gap_minutes)  # type: ignore
+        md = render_multi_project_worklog(title, grouped, details, add_summary=args.add_summary, summary_text=summary_text, gap_minutes=args.session_gap_minutes, repo_to_pull_times=repo_to_pull_times_multi)  # type: ignore
 
     if args.output:
         os.makedirs(os.path.dirname(args.output), exist_ok=True) if os.path.dirname(args.output) else None
