@@ -15,6 +15,7 @@
 - ⏱️ 精细化时间分析：基于 commit 时间戳统计工作会话、功能窗口、跨项目交叉时间，并在 AI 总结中绘制工作内容时间分布图
 - 🔄 并行工作时间检测：多项目模式下自动识别同时在不同项目上工作的时段，避免重复计算实际工作时间
 - 🌐 **远程仓库支持**：支持 GitHub 和 Gitee 远程仓库的 commits 和 PRs（Pull Requests/MRs）查询，无需本地克隆仓库
+- 📥 **Git Pull 记录支持**：自动检测 git pull/fetch 操作，将 pull 时间作为工作会话的开始时间，更准确地反映实际工作时间（如果一次会话没有 pull，则使用第一个 commit 时间作为开始时间）
 
 ## 项目结构
 
@@ -91,6 +92,41 @@ python git2work.py --github owner/repo1,owner/repo2 --gitee owner/repo3 --days 3
 # 自定义会话间隔（默认1440分钟=24小时，可通过GAP_MINUTES环境变量调整）
 GAP_MINUTES=60 ./gen_worklog.sh 2025-10-29
 ```
+
+## 核心功能说明
+
+### Git Pull 记录支持
+
+工具支持自动检测 git pull/fetch 操作，并将其作为工作会话的开始时间，更准确地反映实际工作时间：
+
+- **工作原理**：
+  - 使用 `git reflog` 获取指定时间范围内的 pull/fetch/merge 操作记录
+  - 为每个工作会话查找第一个 commit 之前最近的 pull 操作
+  - 如果 pull 在 commit 之前且在 2 小时内，使用 pull 时间作为会话开始时间
+  - 如果没有找到合适的 pull，使用第一个 commit 时间作为会话开始时间
+
+- **适用场景**：
+  - 协作开发：每日开始工作时先 pull 项目，pull 时间更准确地反映工作开始
+  - 单机开发：如果没有 pull 记录，仍使用 commit 时间作为开始时间
+  - 远程仓库：GitHub/Gitee 仓库无法获取 pull 记录（仅本地仓库支持）
+
+- **示例**：
+  ```
+  09:00 - git pull（拉取最新代码）
+  09:05 - 第一次 commit
+  09:30 - 第二次 commit
+  
+  会话开始时间：09:00（使用 pull 时间）
+  会话结束时间：09:30
+  会话时长：60 分钟（从 pull 到最后一个 commit）
+  ```
+
+- **技术实现**：
+  - 使用 `git reflog` 获取操作历史，解析 pull/fetch/merge 操作时间
+  - 自动识别相关操作（pull、fetch、merge），过滤无关操作（checkout、commit 等）
+  - 为每个会话查找第一个 commit 之前 2 小时内的 pull 操作
+  - 如果找到合适的 pull，使用 pull 时间；否则使用第一个 commit 时间
+  - 支持多项目模式，每个本地仓库独立处理 pull 记录
 
 ## 详细文档
 
