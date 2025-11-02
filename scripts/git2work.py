@@ -405,7 +405,37 @@ def generate_summary_with_openai(
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     if author:
         system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"
-    user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
+        user_msg = f"请根据以下 commit 记录生成{author}工作总结：\n\n{commit_context}"
+        user_msg += """\n\n最后计算一下效率指数（PEI）：
+        设：
+* $N_c$ = 当日提交次数
+* $L_{add}$ = 新增代码行数
+* $L_{del}$ = 删除代码行数
+* $T$ = 实际投入时间（小时，排除并行重叠）
+* $P_{mod}$ = 修改文件数
+* $C_{eff}$ = 编译通过率（或测试通过率，0~1）
+* $C_{cmp}$ = 代码复杂度系数（0.5~1.5，可依据任务类型调整）
+---
+公式：
+$$
+\\text{PEI} = \\frac{(0.4 N_c + 0.3 \\log_{10}(L_{add}+L_{del}) + 0.2 \\log_{10}(P_{mod}+1)) \\times C_{eff} \\times C_{cmp}}{T/8}
+$$
+> 说明：
+>
+> * 对数项使得代码量和文件数带来递减效益，防止行数堆积造成虚高。
+> * $T/8$ 用于时间归一化（以 8 小时为标准工作日）。
+> * 系数可调：`0.4/0.3/0.2` 权重适合中型项目（如C++工程）。
+参考解释表
+
+| PEI 值 | 效率等级  | 特征描述           |
+| ----- | ----- | -------------- |
+| 0–3   | 💤 低效 | 频繁上下文切换、非核心任务  |
+| 4–6   | ⚙️ 正常 | 持续推进、稳定产出      |
+| 7–9   | 🚀 高效 | 模块重构、系统优化或关键修复 |
+| ≥10   | 🧠 卓越 | 自动化、生成式任务、集中攻坚 |
+        """
+    else:
+        user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
     
     try:
         response = client.chat.completions.create(
@@ -460,7 +490,38 @@ def generate_summary_with_deepseek(
     system_msg = system_prompt or default_system_prompt + "\n此外，请按项目分别估算投入时间（根据提交时间密度与连续性），并给出每个项目的主要产出。"
     if author:
         system_msg += f"\n此外，请基于作者姓名或邮箱包含“{author}”的提交进行工作总结，并在摘要开头显式标注：作者：{author}。"
-    user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
+        user_msg = f"请根据以下 commit 记录生成{author}工作总结：\n\n{commit_context}"
+        user_msg += """\n\n最后计算一下效率指数（PEI）：
+        设：
+* $N_c$ = 当日提交次数
+* $L_{add}$ = 新增代码行数
+* $L_{del}$ = 删除代码行数
+* $T$ = 实际投入时间（小时，排除并行重叠）
+* $P_{mod}$ = 修改文件数
+* $C_{eff}$ = 编译通过率（或测试通过率，0~1）
+* $C_{cmp}$ = 代码复杂度系数（0.5~1.5，可依据任务类型调整）
+---
+公式：
+$$
+\\text{PEI} = \\frac{(0.4 N_c + 0.3 \\log_{10}(L_{add}+L_{del}) + 0.2 \\log_{10}(P_{mod}+1)) \\times C_{eff} \\times C_{cmp}}{T/8}
+$$
+> 说明：
+>
+> * 对数项使得代码量和文件数带来递减效益，防止行数堆积造成虚高。
+> * $T/8$ 用于时间归一化（以 8 小时为标准工作日）。
+> * 系数可调：`0.4/0.3/0.2` 权重适合中型项目（如C++工程）。
+参考解释表
+
+| PEI 值 | 效率等级  | 特征描述           |
+| ----- | ----- | -------------- |
+| 0–3   | 💤 低效 | 频繁上下文切换、非核心任务  |
+| 4–6   | ⚙️ 正常 | 持续推进、稳定产出      |
+| 7–9   | 🚀 高效 | 模块重构、系统优化或关键修复 |
+| ≥10   | 🧠 卓越 | 自动化、生成式任务、集中攻坚 |
+        """
+    else:
+        user_msg = f"请根据以下 commit 记录生成工作总结：\n\n{commit_context}"
+    
 
     # 映射模型名称（DeepSeek 的正确模型名称）
     model_map = {
