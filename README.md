@@ -10,10 +10,11 @@
 - 🎯 支持自定义时间范围、作者过滤
 - 🔧 支持自定义系统提示词
 - 🔄 支持多 LLM 提供商（OpenAI / DeepSeek）
-- 🧩 多项目分析：支持 `--repos` 多仓库输入，输出按“项目→日期→提交”归档
+- 🧩 多项目分析：支持 `--repos` 多仓库输入，输出按"项目→日期→提交"归档
 - 👤 作者过滤：通过 `--author` 或脚本环境变量 `AUTHOR` 仅统计指定作者/邮箱
 - ⏱️ 精细化时间分析：基于 commit 时间戳统计工作会话、功能窗口、跨项目交叉时间，并在 AI 总结中绘制工作内容时间分布图
 - 🔄 并行工作时间检测：多项目模式下自动识别同时在不同项目上工作的时段，避免重复计算实际工作时间
+- 🌐 **远程仓库支持**：支持 GitHub 和 Gitee 远程仓库的 commits 和 PRs（Pull Requests/MRs）查询，无需本地克隆仓库
 
 ## 项目结构
 
@@ -33,7 +34,11 @@ git2work/
 ### 1. 安装依赖
 
 ```bash
+# 基础依赖
 pip install openai gitpython requests
+
+# GitHub 支持（可选，如需要查询 GitHub 仓库）
+pip install PyGithub
 ```
 
 ### 2. 设置 API Key
@@ -44,6 +49,12 @@ export OPENAI_API_KEY="your-openai-key"
 
 # DeepSeek
 export DEEPSEEK_API_KEY="your-deepseek-key"
+
+# GitHub（如需查询 GitHub 仓库）
+export GITHUB_TOKEN="your-github-token"
+
+# Gitee（如需查询 Gitee 仓库）
+export GITEE_TOKEN="your-gitee-token"
 ```
 
 ### 3. 生成工作日志
@@ -64,6 +75,18 @@ AUTHOR="mapoet" ./gen_worklog.sh 2025-10-29
 
 # 多仓库输入（逗号分隔）
 REPOS="/mnt/d/works/RayTracy,/path/to/another" ./gen_worklog.sh 2025-10-29
+
+# 查询 GitHub 仓库（需要设置 GITHUB_TOKEN 环境变量）
+python git2work.py --github owner/repo --github-token YOUR_TOKEN --days 7
+
+# 查询 Gitee 仓库（需要设置 GITEE_TOKEN 环境变量）
+python git2work.py --gitee owner/repo --gitee-token YOUR_TOKEN --days 7
+
+# 混合查询本地和远程仓库
+python git2work.py --repo /path/to/local/repo --github owner/repo --days 7
+
+# 多仓库查询（支持混合本地和远程）
+python git2work.py --github owner/repo1,owner/repo2 --gitee owner/repo3 --days 30
 
 # 自定义会话间隔（默认1440分钟=24小时，可通过GAP_MINUTES环境变量调整）
 GAP_MINUTES=60 ./gen_worklog.sh 2025-10-29

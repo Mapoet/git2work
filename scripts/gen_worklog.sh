@@ -8,6 +8,13 @@ set -e
 REPO="${GIT_REPO:-/mnt/d/works/RayTracy}"
 # 可选：多仓库，逗号分隔，如 REPOS="/path/repo1,/path/repo2"
 REPOS="${REPOS:-/mnt/d/works/RayTracy,/mnt/d/works/git2work,/mnt/d/works/vtec,/mnt/d/works/taskflow}"
+# GitHub 仓库，逗号分隔，格式: OWNER/REPO
+GITHUB_REPOS="${GITHUB_REPOS:-Mapoet/.github,Mapoet/sp3exPhs,Mapoet/RayTracy}"
+# Gitee 仓库，逗号分隔，格式: OWNER/REPO
+GITEE_REPOS="${GITEE_REPOS:-}"
+# GitHub/Gitee token
+GITHUB_TOKEN_ENV="${GITHUB_TOKEN:-}"
+GITEE_TOKEN_ENV="${GITEE_TOKEN:-}"
 OUTPUT_DIR="${SCRIPT_OUTPUT_DIR:-$(dirname "$0")}"
 PROVIDER="${PROVIDER:-deepseek}"            # openai | deepseek
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
@@ -32,9 +39,15 @@ echo "========================================="
 echo "Git Work Log Generator with AI Summary"
 echo "========================================="
 if [ -n "$REPOS" ]; then
-    echo "仓库(多): $REPOS"
-else
-    echo "仓库: $REPO"
+    echo "本地仓库(多): $REPOS"
+elif [ -n "$REPO" ]; then
+    echo "本地仓库: $REPO"
+fi
+if [ -n "$GITHUB_REPOS" ]; then
+    echo "GitHub 仓库: $GITHUB_REPOS"
+fi
+if [ -n "$GITEE_REPOS" ]; then
+    echo "Gitee 仓库: $GITEE_REPOS"
 fi
 echo "日期: $DATE"
 echo "输出: $OUTPUT"
@@ -75,8 +88,26 @@ echo "正在生成工作日志..."
 BASE_CMD=(python3 "$(dirname "$0")/git2work.py" --since "$DATE" --until "$DATE" --output "$OUTPUT" --title "$TITLE" --session-gap-minutes "$GAP_MINUTES")
 if [ -n "$REPOS" ]; then
     BASE_CMD+=(--repos "$REPOS")
-else
+elif [ -n "$REPO" ]; then
     BASE_CMD+=(--repo "$REPO")
+fi
+if [ -n "$GITHUB_REPOS" ]; then
+    BASE_CMD+=(--github "$GITHUB_REPOS")
+    if [ -n "$GITHUB_TOKEN_ENV" ]; then
+        BASE_CMD+=(--github-token "$GITHUB_TOKEN_ENV")
+        echo "已检测到 GITHUB_TOKEN（环境变量），将查询 GitHub 仓库"
+    else
+        echo "提示: 未检测到 GITHUB_TOKEN，如需查询 GitHub 仓库请设置该环境变量"
+    fi
+fi
+if [ -n "$GITEE_REPOS" ]; then
+    BASE_CMD+=(--gitee "$GITEE_REPOS")
+    if [ -n "$GITEE_TOKEN_ENV" ]; then
+        BASE_CMD+=(--gitee-token "$GITEE_TOKEN_ENV")
+        echo "已检测到 GITEE_TOKEN（环境变量），将查询 Gitee 仓库"
+    else
+        echo "提示: 未检测到 GITEE_TOKEN，如需查询 Gitee 仓库请设置该环境变量"
+    fi
 fi
 if [ -n "$AUTHOR_FILTER" ]; then
     BASE_CMD+=(--author "$AUTHOR_FILTER")
@@ -99,19 +130,41 @@ if [ "$TEST_MODE" = "1" ]; then
     fi
     echo "✅ 生成：$TMP_OUT2"
 
-    if [ -n "$REPOS" ]; then
+    if [ -n "$REPOS" ] || [ -n "$GITHUB_REPOS" ] || [ -n "$GITEE_REPOS" ]; then
         echo "3) 多仓库，启用总结"
         TMP_OUT3="${OUTPUT_DIR}/worklog_test_multi_summary.md"
-        if [ "$PROVIDER" = "deepseek" ]; then
-            python3 "$(dirname "$0")/git2work.py" --repos "$REPOS" --since "$DATE" --until "$DATE" --output "$TMP_OUT3" --title "多项目工作日志 ${DATE}" --add-summary --provider deepseek --deepseek-model "$DEEPSEEK_MODEL" ${LLM_ARGS[@]}
-        else
-            python3 "$(dirname "$0")/git2work.py" --repos "$REPOS" --since "$DATE" --until "$DATE" --output "$TMP_OUT3" --title "多项目工作日志 ${DATE}" --add-summary --provider openai --openai-model "$OPENAI_MODEL" ${LLM_ARGS[@]}
+        TEST_CMD=(python3 "$(dirname "$0")/git2work.py" --since "$DATE" --until "$DATE" --output "$TMP_OUT3" --title "多项目工作日志 ${DATE}" --add-summary --session-gap-minutes "$GAP_MINUTES")
+        if [ -n "$REPOS" ]; then
+            TEST_CMD+=(--repos "$REPOS")
+        elif [ -n "$REPO" ]; then
+            TEST_CMD+=(--repo "$REPO")
         fi
+        if [ -n "$GITHUB_REPOS" ]; then
+            TEST_CMD+=(--github "$GITHUB_REPOS")
+            [ -n "$GITHUB_TOKEN_ENV" ] && TEST_CMD+=(--github-token "$GITHUB_TOKEN_ENV")
+        fi
+        if [ -n "$GITEE_REPOS" ]; then
+            TEST_CMD+=(--gitee "$GITEE_REPOS")
+            [ -n "$GITEE_TOKEN_ENV" ] && TEST_CMD+=(--gitee-token "$GITEE_TOKEN_ENV")
+        fi
+        if [ -n "$AUTHOR_FILTER" ]; then
+            TEST_CMD+=(--author "$AUTHOR_FILTER")
+        fi
+        if [ "$PROVIDER" = "deepseek" ]; then
+            TEST_CMD+=(--provider deepseek --deepseek-model "$DEEPSEEK_MODEL" ${LLM_ARGS[@]})
+        else
+            TEST_CMD+=(--provider openai --openai-model "$OPENAI_MODEL" ${LLM_ARGS[@]})
+        fi
+        "${TEST_CMD[@]}"
         echo "✅ 生成：$TMP_OUT3"
     fi
 else
     # 正常执行
-    "${BASE_CMD[@]}" $ADD_SUMMARY ${LLM_ARGS[@]}
+    if [ "$PROVIDER" = "deepseek" ]; then
+        "${BASE_CMD[@]}" --add-summary --provider deepseek --deepseek-model "$DEEPSEEK_MODEL" ${LLM_ARGS[@]}
+    else
+        "${BASE_CMD[@]}" --add-summary --provider openai --openai-model "$OPENAI_MODEL" ${LLM_ARGS[@]}
+    fi
 fi
 
 echo ""
