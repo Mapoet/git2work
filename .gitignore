@@ -1,6 +1,5 @@
 # 工作日志输出文件
-worklog_*.md
-
+worklog_*.*
 # Python
 __pycache__/
 *.py[cod]

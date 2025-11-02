@@ -10,6 +10,10 @@
 - 🎯 支持自定义时间范围、作者过滤
 - 🔧 支持自定义系统提示词
 - 🔄 支持多 LLM 提供商（OpenAI / DeepSeek）
+- 🧩 多项目分析：支持 `--repos` 多仓库输入，输出按“项目→日期→提交”归档
+- 👤 作者过滤：通过 `--author` 或脚本环境变量 `AUTHOR` 仅统计指定作者/邮箱
+- ⏱️ 精细化时间分析：基于 commit 时间戳统计工作会话、功能窗口、跨项目交叉时间，并在 AI 总结中绘制工作内容时间分布图
+- 🔄 并行工作时间检测：多项目模式下自动识别同时在不同项目上工作的时段，避免重复计算实际工作时间
 
 ## 项目结构
 
@@ -49,21 +53,27 @@ export DEEPSEEK_API_KEY="your-deepseek-key"
 cd scripts
 ./gen_worklog.sh
 
-# 使用 DeepSeek
+# 使用 DeepSeek（环境变量控制 LLM 提供方）
 PROVIDER=deepseek ./gen_worklog.sh
 
-# 使用 OpenAI
+# 使用 OpenAI（并指定模型）
 PROVIDER=openai OPENAI_MODEL=gpt-4o-mini ./gen_worklog.sh
 
-# 生成指定日期
-./gen_worklog.sh 2025-10-29
+# 生成指定日期（并按作者过滤）
+AUTHOR="mapoet" ./gen_worklog.sh 2025-10-29
+
+# 多仓库输入（逗号分隔）
+REPOS="/mnt/d/works/RayTracy,/path/to/another" ./gen_worklog.sh 2025-10-29
+
+# 自定义会话间隔（默认1440分钟=24小时，可通过GAP_MINUTES环境变量调整）
+GAP_MINUTES=60 ./gen_worklog.sh 2025-10-29
 ```
 
 ## 详细文档
 
 查看 [scripts/README.md](scripts/README.md) 获取完整的使用说明。
 
-## 许可证
+## License
 
-MIT License
+MIT License（见 `LICENSE`）
 
