@@ -7,7 +7,7 @@ set -e
 # 默认配置与 LLM 提供方
 REPO="${GIT_REPO:-/mnt/d/works/RayTracy}"
 # 可选：多仓库，逗号分隔，如 REPOS="/path/repo1,/path/repo2"
-REPOS="${REPOS:-/mnt/d/works/RayTracy,/mnt/d/works/git2work,/mnt/d/works/vtec,/mnt/d/works/taskflow}"
+REPOS="${REPOS:-/mnt/d/works/RayTracy,/mnt/d/works/git2work,/mnt/d/works/vtec,/mnt/d/works/taskflow,/home/mapoet/Data/works/autoGit-MCP}"
 # GitHub 仓库，逗号分隔，格式: OWNER/REPO
 GITHUB_REPOS="${GITHUB_REPOS:-Mapoet/.github,Mapoet/sp3exPhs,Mapoet/RayTracy}"
 # Gitee 仓库，逗号分隔，格式: OWNER/REPO
