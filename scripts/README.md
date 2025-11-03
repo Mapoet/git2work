@@ -2,6 +2,8 @@
 
 自动生成 Git 工作日志并使用 OpenAI API 生成智能总结的工具。
 
+> **新特性**：现在支持自动检测 git pull 操作，将 pull 时间作为工作会话的开始时间，更准确地反映实际工作时间！
+
 ## 功能特性
 
 - 📝 从 Git 提交记录生成详细的工作日志（Markdown 格式）
@@ -12,6 +14,7 @@
 - ⏱️ **精细化时间分析**：自动识别工作会话、功能窗口、跨项目交叉时间，并在 AI 总结中生成时间分布图
 - 🔄 **并行工作时间检测**：多项目模式下自动识别同时在不同项目上工作的时段，准确评估实际工作时间（避免重复累加）
 - 🌐 **远程仓库支持**：支持 GitHub 和 Gitee 远程仓库的 commits 和 PRs（Pull Requests/MRs）查询，无需本地克隆仓库
+- 📥 **Git Pull 记录支持**：自动检测 git pull/fetch 操作，将 pull 时间作为工作会话的开始时间，更准确地反映实际工作时间（如果一次会话没有 pull，则使用第一个 commit 时间作为开始时间）
 
 ## 安装依赖
 
@@ -104,8 +107,22 @@ AUTHOR="mapoet" \
   --days 30 --add-summary --output worklog_all.md
 ```
 
+**Git Pull 记录说明**：
+- **自动检测**：脚本会自动检测本地仓库的 git pull/fetch/merge 操作
+- **会话开始时间**：如果会话的第一个 commit 之前有 pull 操作（2 小时内），会使用 pull 时间作为会话开始时间
+- **示例场景**：
+  - 场景 1：09:00 pull 项目 → 09:05 开始 commit → 会话开始时间：09:00（使用 pull 时间）
+  - 场景 2：09:05 直接 commit（没有 pull）→ 会话开始时间：09:05（使用第一个 commit 时间）
+  - 场景 3：07:00 pull 项目 → 09:05 commit（超过 2 小时）→ 会话开始时间：09:05（pull 时间超过有效范围，使用 commit 时间）
+- **优势**：更准确地反映实际工作时间，特别是在协作开发场景中，pull 操作通常标志着工作开始
+
 **时间分析功能说明**：
-- **工作会话**：根据 commit 时间戳自动识别连续工作时段（相邻提交间隔小于指定分钟数视为同一会话）
+- **工作会话**：
+  - 根据 commit 时间戳自动识别连续工作时段（相邻提交间隔小于指定分钟数视为同一会话）
+  - **Git Pull 记录支持**：自动检测 git pull/fetch 操作，作为会话开始时间参考
+    - 如果会话的第一个 commit 之前有 pull 操作（且在 2 小时内），使用 pull 时间作为会话开始时间
+    - 如果没有找到合适的 pull 记录，使用第一个 commit 时间作为会话开始时间
+    - 这样可以更准确地反映实际工作时间，因为协作开发时通常先 pull 项目再开始工作
 - **功能窗口**：按 commit message 类型（feat/fix/docs/build/refactor等）统计各功能的起止时间
 - **跨项目并行工作时间检测**：
   - 多项目模式下，自动检测不同项目在时间上重叠的工作时段
@@ -216,6 +233,11 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
      - 重要提示：并行工作时间不应简单累加
    - **各项目时间统计**：
      - 工作会话统计：会话数量、总时长、每个会话的起止时间与提交数
+     - **会话开始时间优化**：
+       - 自动检测 git pull/fetch 操作，作为会话开始时间参考
+       - 如果会话的第一个 commit 之前有 pull 操作（且在 2 小时内），使用 pull 时间作为会话开始时间
+       - 如果没有找到合适的 pull，使用第一个 commit 时间作为会话开始时间
+       - 这样可以更准确地反映实际工作时间，因为协作开发时通常先 pull 项目再开始工作
      - 并行会话标记：标注哪些会话属于并行工作时段
    - **功能窗口统计**：按类型（feat/fix/docs等）统计各功能的起止时间与提交数
 3. **按日期分组的提交记录**：
@@ -240,10 +262,90 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
      - 按项目分别估算投入时间与主要产出
      - **特别注意并行工作时间**：在评估总投入时间时，会将并行时段考虑在内，避免重复计算
 
+## 核心功能详解
+
+### Git Pull 记录支持
+
+工具支持自动检测 git pull/fetch 操作，并将其作为工作会话的开始时间，更准确地反映实际工作时间。
+
+#### 工作原理
+
+1. **Pull 记录获取**：
+   - 使用 `git reflog` 获取指定时间范围内的操作历史
+   - 识别 pull/fetch/merge 等操作（过滤掉 checkout、commit、reset 等无关操作）
+   - 解析操作时间戳，筛选在查询时间范围内的记录
+
+2. **会话开始时间计算**：
+   - 为每个工作会话查找第一个 commit 之前最近的 pull 操作
+   - 如果 pull 在 commit 之前且在 **2 小时内**，使用 pull 时间作为会话开始时间
+   - 如果 pull 时间超过 2 小时或没有找到 pull，使用第一个 commit 时间作为开始时间
+
+3. **时间范围**：
+   - Pull 记录有效范围：2 小时内的 pull 视为有效（可在代码中调整）
+   - 超过 2 小时的 pull 视为不相关（可能是前一天的操作）
+
+#### 适用场景与示例
+
+**场景 1：协作开发（有 pull 记录）**
+```
+09:00 - git pull（拉取最新代码）
+09:05 - commit: feat: 添加新功能
+09:30 - commit: fix: 修复 bug
+10:00 - commit: docs: 更新文档
+
+会话开始时间：09:00（使用 pull 时间）
+会话结束时间：10:00
+会话时长：60 分钟
+```
+
+**场景 2：单机开发（无 pull 记录）**
+```
+09:05 - commit: feat: 添加新功能
+09:30 - commit: fix: 修复 bug
+
+会话开始时间：09:05（使用第一个 commit 时间）
+会话结束时间：09:30
+会话时长：25 分钟
+```
+
+**场景 3：Pull 时间过久（超过 2 小时）**
+```
+07:00 - git pull（早上拉取代码）
+09:30 - commit: feat: 添加新功能（2.5 小时后）
+
+会话开始时间：09:30（pull 超过有效范围，使用 commit 时间）
+```
+
+#### 技术细节
+
+- **Pull 操作识别**：
+  - 通过 `git reflog` 解析操作历史，识别包含以下关键词的操作：`pull`、`fetch`、`merge`、`update`、`rebase`
+  - 自动过滤掉无关操作（如 `checkout`、`commit`、`reset`、`branch`、`switch` 等）
+  - 支持多种 pull 场景：`pull: Fast-forward`、`pull: Merge`、`fetch`、`merge` 等
+
+- **时间匹配算法**：
+  - 为每个工作会话的第一个 commit 查找之前的 pull 操作
+  - 使用倒序遍历（从最近到最早），找到第一个在 commit 之前的 pull
+  - 时间有效性检查：pull 必须在 commit 之前，且时间差不超过 2 小时
+  - 如果多个会话，每个会话独立查找对应的 pull 记录
+
+- **性能优化**：
+  - Pull 记录获取失败不会影响主流程（静默失败，返回空列表）
+  - 如果仓库没有 reflog 或查询时间范围内没有 pull，不影响 commit 处理和会话计算
+  - Pull 记录只在本地仓库处理，远程仓库直接跳过
+
+#### 注意事项
+
+- **仅本地仓库支持**：GitHub/Gitee 等远程仓库无法获取 pull 记录（仅查询 commits 和 PRs）
+- **依赖 reflog**：如果仓库没有 reflog 或 reflog 已过期，会静默跳过，不影响主流程
+- **有效时间范围**：Pull 在第一个 commit 之前 2 小时内才被视为有效（可根据需要调整）
+- **自动处理**：所有处理都是自动的，无需额外配置
+- **多项目支持**：多项目模式下，每个本地仓库独立获取和处理 pull 记录
+
 ## 示例
 
 ```bash
-# 生成今天的工作日志
+# 生成今天的工作日志（自动使用 pull 记录优化会话时间）
 ./gen_worklog.sh
 
 # 生成指定日期的工作日志
@@ -252,11 +354,11 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
 # 生成带自定义提示词的日志
 ./git2work.py --days 1 --output worklog.md --add-summary --system-prompt-file custom_prompt.txt
 
-# 查询 GitHub 仓库并生成工作日志
+# 查询 GitHub 仓库并生成工作日志（远程仓库无法获取 pull 记录）
 ./git2work.py --github owner/repo --github-token YOUR_TOKEN \
   --days 7 --add-summary --output worklog_github.md
 
-# 混合查询本地和远程仓库
+# 混合查询本地和远程仓库（本地仓库会自动使用 pull 记录）
 ./git2work.py \
   --repo /mnt/d/works/RayTracy \
   --github owner/repo1 --gitee owner/repo2 \
@@ -275,5 +377,11 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
    - 无法获取文件变更统计（numstat），这些字段会显示为 0
    - 某些情况下无法获取完整的 commit body
    - PRs 按 `updated_at` 时间筛选，而不是创建时间
-6. API 调用会产生费用（OpenAI/DeepSeek）
-7. 建议使用 `gpt-4o-mini` 或 `deepseek-chat` 模型以节省成本
+6. **Git Pull 记录检测**：
+   - 仅对本地仓库有效（通过 `git reflog` 获取）
+   - 远程仓库（GitHub/Gitee）无法检测 pull 操作
+   - Pull 记录有效范围：如果 pull 在第一个 commit 之前且在 2 小时内，会使用 pull 时间作为会话开始时间
+   - 如果仓库没有 reflog 或 reflog 已过期，会静默跳过，不影响主流程
+   - Pull 操作识别关键词：`pull`、`fetch`、`merge`、`update`、`rebase`
+7. API 调用会产生费用（OpenAI/DeepSeek）
+8. 建议使用 `gpt-4o-mini` 或 `deepseek-chat` 模型以节省成本
