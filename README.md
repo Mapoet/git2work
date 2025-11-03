@@ -1,5 +1,11 @@
 # Git Work Log Generator
 
+> ⚠️ **项目状态说明**
+> 
+> **本项目已停止研发**，后续功能将移植到 [autoGit-MCP](https://github.com/Mapoet/autoGit-MCP) 项目中进行持续更新。
+> 
+> 请关注新项目：[https://github.com/Mapoet/autoGit-MCP](https://github.com/Mapoet/autoGit-MCP)
+
 自动生成 Git 工作日志并使用 AI（OpenAI/DeepSeek）生成智能总结的工具。
 
 ## 功能特性
