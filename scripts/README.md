@@ -1,10 +1,281 @@
-# Git Work Log Generator with AI Summary
+# GitHub Activity Analyzer & Git Work Log Generator
+
+本目录包含两个核心工具的详细使用文档：
+
+1. **GitHub 活动分析工具（git_activity.py）**：数据收集与发现工具，用于分析 GitHub 上的代码活动
+2. **Git Work Log Generator（git2work.py）**：工作日志生成工具，基于 Git 提交记录生成详细的工作日志和 AI 总结
+
+---
+
+## 工具一：GitHub 活动分析工具（git_activity.py）
+
+`git_activity.py` 是一个基于 PyGithub 的 GitHub 活动抓取和汇总工具，支持多种查询模式，可以帮你分析 GitHub 上的代码活动。
+
+### 安装依赖
+
+```bash
+pip install PyGithub python-dateutil
+```
+
+### 认证设置
+
+```bash
+# 设置 GitHub Personal Access Token（可选，但建议设置以提高 API 速率限制）
+export GITHUB_TOKEN="your-github-token"
+
+# 未设置 token 时，将按未授权调用（速率限制 60/h）
+```
+
+### 支持的查询模式
+
+#### 1. cross-repos：不同仓库同一作者（提交明细）
+
+查询指定作者在多个仓库中的提交记录。
+
+```bash
+python git_activity.py cross-repos \
+  --author-login Mapoet \
+  --since 2025-01-01 --until 2025-11-04 \
+  --owner someuser \
+  --repo-type all \
+  --max-per-repo 1000 \
+  --out cross_repos.csv
+```
+
+**参数说明**：
+- `--author-login`：作者 GitHub 登录名
+- `--author-email`：作者邮箱（更稳定，可选）
+- `--since`：起始时间（ISO 或 YYYY-MM-DD 格式）
+- `--until`：结束时间
+- `--owner`：枚举此 owner 的仓库（用户或组织）。不填则默认枚举 author-login 的仓库
+- `--repo-type`：仓库类型（`owner`/`member`/`all`/`public`/`private`，默认 `owner`）
+- `--max-per-repo`：每个仓库最多查询的提交数（默认 1000）
+
+**输出字段**：`repo`, `sha`, `date`, `author_login`, `author_name`, `author_email`, `committer_login`, `title`, `url`
+
+#### 2. repo-authors：同一仓库不同作者（提交明细）
+
+查询指定仓库中多个作者的提交记录。
+
+```bash
+python git_activity.py repo-authors \
+  --repo-full owner/repo \
+  --authors-login Mapoet User2 \
+  --since 2025-01-01 --until 2025-11-04 \
+  --max-per-author 1000 \
+  --out repo_authors.csv
+```
+
+**参数说明**：
+- `--repo-full`：仓库全名（格式：`owner/name`，必填）
+- `--authors-login`：作者登录名列表（可选，不提供则返回时间窗内所有提交）
+- `--authors-emails`：作者邮箱列表（可选）
+- `--max-per-author`：每个作者最多查询的提交数（默认 1000）
+
+#### 3. repos-by-author：同一作者在哪些仓库有活动（列表 + 提交数）
+
+列出指定作者活跃的仓库及其提交数（按提交数降序）。
+
+```bash
+python git_activity.py repos-by-author \
+  --author-login Mapoet \
+  --since 2025-01-01 --until 2025-11-04 \
+  --owner someuser \
+  --repo-type all \
+  --min-commits 3 \
+  --out repos_by_author.csv
+```
+
+**参数说明**：
+- `--min-commits`：最小提交数阈值（默认 1）
+- 其他参数同 `cross-repos`
+
+**输出字段**：`repo`, `commits`
+
+#### 4. authors-by-repo：同一仓库哪些作者有活动（列表 + 提交数）
+
+列出指定仓库中的活跃作者及其提交数（按提交数降序）。
+
+```bash
+python git_activity.py authors-by-repo \
+  --repo-full owner/repo \
+  --since 2025-01-01 --until 2025-11-04 \
+  --prefer login \
+  --min-commits 1 \
+  --out authors_by_repo.csv
+```
+
+**参数说明**：
+- `--prefer`：主显示字段偏好（`login`/`email`/`name`，默认 `login`）
+
+**输出字段**：`repo`, `author_key`, `author_login`, `author_email`, `commits`
+
+#### 5. search-repos：按关键词搜索项目列表
+
+使用 GitHub Search API 搜索仓库，支持多种过滤条件。
+
+```bash
+python git_activity.py search-repos \
+  --keyword "ray tracing" \
+  --language C++ \
+  --min-stars 100 \
+  --pushed-since 2025-09-01 \
+  --topic rendering \
+  --owner NVIDIA \
+  --sort updated \
+  --order desc \
+  --limit 200 \
+  --out search_repos.csv
+```
+
+**参数说明**：
+- `--keyword`：关键词（匹配 name/description/readme，必填）
+- `--language`：语言限定（如 `Python`/`C++`/`TypeScript`）
+- `--min-stars`：最小 Star 数
+- `--pushed-since`：最近活跃起始时间（如 `2025-09-01`）
+- `--topic`：限定某个 topic
+- `--owner`：限定某个用户/组织的仓库
+- `--sort`：排序方式（`updated`/`stars`/`forks`，默认 `updated`）
+- `--order`：排序顺序（`desc`/`asc`，默认 `desc`）
+- `--limit`：最多返回条数（默认 200，范围 1-2000）
+
+**输出字段**：`full_name`, `name`, `owner`, `description`, `language`, `stargazers_count`, `forks_count`, `archived`, `private`, `updated_at`, `pushed_at`, `html_url`
+
+#### 6. org-repos：按组织获取项目列表
+
+列出指定组织的所有仓库。
+
+```bash
+python git_activity.py org-repos \
+  --org NVIDIA-RTX \
+  --repo-type all \
+  --include-archived \
+  --sort updated \
+  --limit 500 \
+  --out org_repos.csv
+```
+
+**参数说明**：
+- `--org`：组织名（必填）
+- `--repo-type`：仓库类型（`all`/`public`/`private`/`forks`/`sources`/`member`，默认 `all`）
+- `--include-archived`：包含 archived 仓库（默认不包含）
+- `--sort`：排序方式（`updated`/`pushed`/`full_name`，默认 `updated`）
+- `--limit`：最多返回条数（默认 500，范围 1-5000）
+
+#### 7. user-repos：列出某用户拥有/Star 的项目列表（可合并）
+
+列出指定用户拥有或 Star 的仓库列表，支持合并查询和多种过滤排序选项。
+
+```bash
+python git_activity.py user-repos \
+  --login mapoet \
+  --query-mode both \
+  --include-private \
+  --include-archived \
+  --include-forks \
+  --sort updated \
+  --order desc \
+  --limit 300 \
+  --out user_repos.csv
+```
+
+**参数说明**：
+- `--login`：GitHub 用户登录名（必填）
+- `--query-mode`：查询模式（`owned`/`starred`/`both`，默认 `both`）
+  - `owned`：仅查询用户拥有的仓库
+  - `starred`：仅查询用户 Star 的仓库
+  - `both`：合并查询 owned 和 starred，然后统一排序和限量
+- `--include-private`：包含私有仓库（需 token 权限）
+- `--include-archived`：包含 archived 仓库（默认不包含）
+- `--include-forks`：包含 fork 仓库（默认不包含）
+- `--sort`：排序方式（`updated`/`pushed`/`full_name`/`stars`，默认 `updated`）
+- `--order`：排序顺序（`desc`/`asc`，默认 `desc`）
+- `--limit`：最多返回条数（默认 500）
+
+**输出字段**：`relation`（`owned` 或 `starred`）, `full_name`, `name`, `owner`, `description`, `language`, `stargazers_count`, `forks_count`, `archived`, `private`, `updated_at`, `pushed_at`, `html_url`
+
+**性能优化**：
+- 自动去重：如果同一个仓库同时出现在 owned 和 starred，保留 owned
+- 提前退出：收集到足够数据后提前停止，避免处理过多仓库
+- 速率限制保护：自动检测 API 速率限制并等待重置
+
+### 使用技巧
+
+1. **时间格式**：支持 ISO 格式（`2025-01-01T00:00:00Z`）或简单日期格式（`2025-01-01`）
+
+2. **速率限制**：
+   - 未设置 token：60 次/小时
+   - 设置 token：5000 次/小时
+   - 工具会自动检测速率限制并在需要时等待
+
+3. **调试输出**：所有模式都会输出详细的进度信息到 stderr，方便跟踪执行过程
+
+4. **错误处理**：单个仓库访问失败不会影响整体流程，会继续处理其他仓库
+
+5. **性能建议**：
+   - 对于大量仓库的查询，合理设置 `--limit` 参数
+   - 使用时间范围过滤减少查询量
+   - `user-repos` 模式在 `both` 模式下会自动优化，避免处理过多数据
+
+### 示例场景
+
+#### 场景 1：查询自己在某个组织的所有仓库中的活动
+
+```bash
+python git_activity.py repos-by-author \
+  --author-login Mapoet \
+  --since 2025-01-01 --until 2025-11-04 \
+  --owner someorg \
+  --repo-type all \
+  --min-commits 5 \
+  --out my_activity.csv
+```
+
+#### 场景 2：搜索特定技术栈的仓库
+
+```bash
+python git_activity.py search-repos \
+  --keyword "vulkan ray tracing" \
+  --language C++ \
+  --min-stars 50 \
+  --sort stars \
+  --order desc \
+  --limit 100 \
+  --out vulkan_repos.csv
+```
+
+#### 场景 3：分析某个仓库的贡献者
+
+```bash
+python git_activity.py authors-by-repo \
+  --repo-full owner/repo \
+  --since 2025-01-01 --until 2025-11-04 \
+  --min-commits 10 \
+  --out contributors.csv
+```
+
+#### 场景 4：获取用户的所有项目（owned + starred）
+
+```bash
+python git_activity.py user-repos \
+  --login mapoet \
+  --query-mode both \
+  --include-forks \
+  --sort updated \
+  --order desc \
+  --limit 500 \
+  --out all_repos.csv
+```
+
+---
+
+## 工具二：Git Work Log Generator（git2work.py）
 
 自动生成 Git 工作日志并使用 OpenAI API 生成智能总结的工具。
 
 > **新特性**：现在支持自动检测 git pull 操作，将 pull 时间作为工作会话的开始时间，更准确地反映实际工作时间！
 
-## 功能特性
+### 功能特性
 
 - 📝 从 Git 提交记录生成详细的工作日志（Markdown 格式）
 - 🤖 使用 OpenAI 或 DeepSeek API 自动生成中文工作总结
@@ -16,19 +287,19 @@
 - 🌐 **远程仓库支持**：支持 GitHub 和 Gitee 远程仓库的 commits 和 PRs（Pull Requests/MRs）查询，无需本地克隆仓库
 - 📥 **Git Pull 记录支持**：自动检测 git pull/fetch 操作，将 pull 时间作为工作会话的开始时间，更准确地反映实际工作时间（如果一次会话没有 pull，则使用第一个 commit 时间作为开始时间）
 
-## 安装依赖
+### 安装依赖
 
 ```bash
 # 基础依赖
 pip install openai gitpython requests
 
 # GitHub 支持（可选，如需要查询 GitHub 仓库）
-pip install PyGithub
+pip install PyGithub python-dateutil
 ```
 
-## 使用方法
+### 使用方法
 
-### 方法 1: 使用便捷脚本（推荐）
+#### 方法 1: 使用便捷脚本（推荐）
 
 ```bash
 # 生成今天的工作日志（带 AI 总结）
@@ -40,7 +311,6 @@ pip install PyGithub
 # 生成指定日期的日志并保存到指定文件
 ./gen_worklog.sh 2025-10-28 worklog.md
 
-#### 作者过滤与多仓
 # 仅统计作者(名字或邮箱包含关键字)
 AUTHOR="mapoet" ./gen_worklog.sh 2025-10-29
 
@@ -48,12 +318,11 @@ AUTHOR="mapoet" ./gen_worklog.sh 2025-10-29
 REPOS="/mnt/d/works/RayTracy,/path/to/another" \
 AUTHOR="mapoet" \
 ./gen_worklog.sh 2025-10-29
-
 ```
 
-### 方法 2: 直接使用 Python 脚本
+#### 方法 2: 直接使用 Python 脚本
 
-#### 基本用法
+##### 基本用法
 
 ```bash
 # 生成今天的工作日志（不带 AI 总结）
@@ -66,10 +335,10 @@ AUTHOR="mapoet" \
 ./git2work.py --days 7 --output worklog_7days.md
 ```
 
-#### 多项目与精细化时间分析
+##### 多项目与精细化时间分析
 
 ```bash
-# 多项目：自动汇总“项目→日期→提交”，并在 AI 总结中按项目估算投入时间与主要产出
+# 多项目：自动汇总"项目→日期→提交"，并在 AI 总结中按项目估算投入时间与主要产出
 # 时间统计会自动识别工作会话（默认间隔120分钟，可通过--session-gap-minutes调整）
 ./git2work.py \
   --repos "/mnt/d/works/RayTracy,/path/to/another" \
@@ -77,12 +346,6 @@ AUTHOR="mapoet" \
   --add-summary --provider deepseek --deepseek-model deepseek-chat \
   --session-gap-minutes 60 \
   --output worklog_multi.md --title "多项目工作日志"
-
-./git2work.py --days 30 \
-  --author mapoet --output worklog_today.md \
-  --add-summary --system-prompt-file system_prompt.txt \
-  --repos /mnt/d/works/RayTracy,/mnt/d/works/git2work,/mnt/d/works/vtec \
-  --provider deepseek
 
 # 查询 GitHub 仓库（需要 GitHub token）
 ./git2work.py --github owner/repo --github-token YOUR_TOKEN \
@@ -132,7 +395,7 @@ AUTHOR="mapoet" \
 - **跨项目分析**：自动统计项目间切换的时间点，识别项目上下文切换模式
 - **时间分布图**：AI 总结会自动生成包含会话时间轴、提交分布、并行工作标注的可视化图表（Markdown/Mermaid 格式）
 
-#### 使用 AI 总结
+##### 使用 AI 总结
 
 ```bash
 # 需要先设置 OpenAI API Key
@@ -148,7 +411,7 @@ export OPENAI_API_KEY="your-api-key"
 ./git2work.py --days 1 --output worklog_today.md --add-summary --openai-model "gpt-4o-mini"
 ```
 
-#### 命令行参数说明
+##### 命令行参数说明
 
 ```bash
 ./git2work.py --help
@@ -176,7 +439,7 @@ export OPENAI_API_KEY="your-api-key"
 - `--deepseek-model`: DeepSeek 模型（默认：deepseek-chat）
 - `--system-prompt-file`: 自定义系统提示词文件路径
 
-## 自定义系统提示词
+### 自定义系统提示词
 
 编辑 `system_prompt.txt` 文件来自定义 AI 总结的生成方式。
 
@@ -196,9 +459,9 @@ export OPENAI_API_KEY="your-api-key"
 4. 重点关注代码改进、功能增强、问题修复等技术性内容
 ```
 
-## 配置
+### 配置
 
-### 环境变量
+#### 环境变量
 
 - `OPENAI_API_KEY`: OpenAI API Key
 - `DEEPSEEK_API_KEY`: DeepSeek API Key
@@ -211,7 +474,7 @@ export OPENAI_API_KEY="your-api-key"
 - `SCRIPT_OUTPUT_DIR`: 脚本输出目录
 - `AUTHOR`: 作者过滤关键字（通过 `gen_worklog.sh` 使用时）
 
-### 示例
+#### 示例
 
 ```bash
 export OPENAI_API_KEY="sk-xxxxx"
@@ -221,7 +484,7 @@ export GIT_REPO="/path/to/your/repo"
 export SCRIPT_OUTPUT_DIR="/path/to/output"
 ```
 
-## 输出格式
+### 输出格式
 
 生成的工作日志包含：
 
@@ -262,13 +525,13 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
      - 按项目分别估算投入时间与主要产出
      - **特别注意并行工作时间**：在评估总投入时间时，会将并行时段考虑在内，避免重复计算
 
-## 核心功能详解
+### 核心功能详解
 
-### Git Pull 记录支持
+#### Git Pull 记录支持
 
 工具支持自动检测 git pull/fetch 操作，并将其作为工作会话的开始时间，更准确地反映实际工作时间。
 
-#### 工作原理
+##### 工作原理
 
 1. **Pull 记录获取**：
    - 使用 `git reflog` 获取指定时间范围内的操作历史
@@ -284,7 +547,7 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
    - Pull 记录有效范围：2 小时内的 pull 视为有效（可在代码中调整）
    - 超过 2 小时的 pull 视为不相关（可能是前一天的操作）
 
-#### 适用场景与示例
+##### 适用场景与示例
 
 **场景 1：协作开发（有 pull 记录）**
 ```
@@ -316,7 +579,7 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
 会话开始时间：09:30（pull 超过有效范围，使用 commit 时间）
 ```
 
-#### 技术细节
+##### 技术细节
 
 - **Pull 操作识别**：
   - 通过 `git reflog` 解析操作历史，识别包含以下关键词的操作：`pull`、`fetch`、`merge`、`update`、`rebase`
@@ -334,7 +597,7 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
   - 如果仓库没有 reflog 或查询时间范围内没有 pull，不影响 commit 处理和会话计算
   - Pull 记录只在本地仓库处理，远程仓库直接跳过
 
-#### 注意事项
+##### 注意事项
 
 - **仅本地仓库支持**：GitHub/Gitee 等远程仓库无法获取 pull 记录（仅查询 commits 和 PRs）
 - **依赖 reflog**：如果仓库没有 reflog 或 reflog 已过期，会静默跳过，不影响主流程
@@ -342,7 +605,7 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
 - **自动处理**：所有处理都是自动的，无需额外配置
 - **多项目支持**：多项目模式下，每个本地仓库独立获取和处理 pull 记录
 
-## 示例
+### 示例
 
 ```bash
 # 生成今天的工作日志（自动使用 pull 记录优化会话时间）
@@ -365,7 +628,7 @@ export SCRIPT_OUTPUT_DIR="/path/to/output"
   --days 30 --add-summary --output worklog_mixed.md
 ```
 
-## 注意事项
+### 注意事项
 
 1. 确保已安装必要的 Python 包（`openai`, `gitpython`, `requests`）
 2. 如需查询 GitHub 仓库，需要安装 `PyGithub`：`pip install PyGithub`
